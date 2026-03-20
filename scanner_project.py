@@ -1767,125 +1767,151 @@ def main() -> None:
         else:
             universe_symbols_bt, universe_source_bt = resolve_universe(universe_bt)
 
-        timeframe_bt = st.selectbox(
-            "Timeframe",
-            options=["Daily", "Weekly"],
-            index=0,
-        )
-        resample_rule_bt = "W-FRI" if timeframe_bt == "Weekly" else None
-        timeframe_label_bt = "1W" if timeframe_bt == "Weekly" else "1D"
-
-        use_max_history = st.checkbox("Use Max History (from beginning)", value=False)
-        if use_max_history:
-            start_date = None
-            end_date = None
-            st.caption("Using full available history.")
-        else:
-            today = datetime.now().date()
-            default_start = today.replace(year=today.year - 2)
-            date_range = st.date_input(
-                "Select Date Range",
-                value=(default_start, today),
+        tf_col, date_col = st.columns([1, 2])
+        with tf_col:
+            timeframe_bt = st.selectbox(
+                "Timeframe",
+                options=["Daily", "Weekly"],
+                index=0,
             )
-            if isinstance(date_range, tuple) and len(date_range) == 2:
-                start_date, end_date = date_range
-            else:
+            resample_rule_bt = "W-FRI" if timeframe_bt == "Weekly" else None
+            timeframe_label_bt = "1W" if timeframe_bt == "Weekly" else "1D"
+        with date_col:
+            use_max_history = st.checkbox("Use Max History (from beginning)", value=False)
+            if use_max_history:
                 start_date = None
                 end_date = None
+                st.caption("Using full available history.")
+            else:
+                today = datetime.now().date()
+                default_start = today.replace(year=today.year - 2)
+                date_range = st.date_input(
+                    "Select Date Range",
+                    value=(default_start, today),
+                )
+                if isinstance(date_range, tuple) and len(date_range) == 2:
+                    start_date, end_date = date_range
+                else:
+                    start_date = None
+                    end_date = None
 
-        st.subheader("Entry Rules")
+        st.subheader("Rules")
         use_custom_rules = st.checkbox("Use Custom Rule Logic (Pine-like)", value=False)
         entry_expr = ""
         exit_expr = ""
         if use_custom_rules:
             st.caption("Example: rsi(14) crosses above 50 and close > ema(200) and supertrend(10,3) == green")
-            entry_expr = st.text_area("Entry Rule", height=90)
-            exit_expr = st.text_area("Exit Rule", height=90)
+            presets = {
+                "Trend Long": (
+                    "rsi(14) crosses above 50 and close > ema(200) and supertrend(10,3) == green",
+                    "rsi(14) crosses below 50 or close < ema(200) or supertrend(10,3) == red",
+                ),
+                "Trend Short": (
+                    "rsi(14) crosses below 50 and close < ema(200) and supertrend(10,3) == red",
+                    "rsi(14) crosses above 50 or close > ema(200) or supertrend(10,3) == green",
+                ),
+            }
+            preset_name = st.selectbox(
+                "Rule Presets",
+                options=["Custom"] + list(presets.keys()),
+                index=0,
+                key="bt_rule_preset",
+            )
+            if preset_name in presets:
+                preset_entry, preset_exit = presets[preset_name]
+                st.session_state["bt_entry_rule"] = preset_entry
+                st.session_state["bt_exit_rule"] = preset_exit
+            entry_expr = st.text_area("Entry Rule", height=80, key="bt_entry_rule")
+            exit_expr = st.text_area("Exit Rule", height=80, key="bt_exit_rule")
 
-        selected_filters_bt = st.multiselect(
-            "Select Filters",
-            options=[
-                "EMA Filter (Trend)",
-                "RSI Filter (Momentum)",
-                "Supertrend Filter (Support/Resistance)",
-            ],
-            default=["EMA Filter (Trend)"],
-            disabled=use_custom_rules,
-        )
-        trade_direction_bt = st.selectbox(
-            "Trade Direction",
-            options=["Auto (Supertrend)", "Long", "Short"],
-            index=0,
-        )
+        filter_col, dir_col = st.columns([2, 1])
+        with filter_col:
+            selected_filters_bt = st.multiselect(
+                "Select Filters",
+                options=[
+                    "EMA Filter (Trend)",
+                    "RSI Filter (Momentum)",
+                    "Supertrend Filter (Support/Resistance)",
+                ],
+                default=["EMA Filter (Trend)"],
+                disabled=use_custom_rules,
+            )
+        with dir_col:
+            trade_direction_bt = st.selectbox(
+                "Trade Direction",
+                options=["Auto (Supertrend)", "Long", "Short"],
+                index=0,
+            )
         use_ema_bt = "EMA Filter (Trend)" in selected_filters_bt
         use_rsi_bt = "RSI Filter (Momentum)" in selected_filters_bt
         use_supertrend_bt = "Supertrend Filter (Support/Resistance)" in selected_filters_bt
 
-        if use_ema_bt:
-            ema_direction_bt = st.radio(
-                "EMA Condition",
-                options=["Below EMA", "Above EMA"],
+        with st.expander("Entry Parameters", expanded=not use_custom_rules):
+            if use_ema_bt:
+                ema_direction_bt = st.radio(
+                    "EMA Condition",
+                    options=["Below EMA", "Above EMA"],
+                    index=0,
+                    horizontal=True,
+                    disabled=use_custom_rules,
+                )
+                ema_period_bt = st.number_input("EMA Period", min_value=50, max_value=400, value=200, step=5, disabled=use_custom_rules)
+            else:
+                ema_direction_bt = "Above EMA"
+                ema_period_bt = 200
+    
+            if use_rsi_bt:
+                rsi_length_bt = st.number_input("RSI Length", min_value=2, max_value=200, value=14, step=1, disabled=use_custom_rules)
+                rsi_threshold_bt = st.number_input("RSI Threshold", min_value=1.0, max_value=99.0, value=50.0, step=1.0, disabled=use_custom_rules)
+                rsi_mode_bt = st.selectbox(
+                    "RSI Condition",
+                    options=["RSI > Threshold", "RSI < Threshold", "RSI Crosses Above", "RSI Crosses Below"],
+                    index=0,
+                    disabled=use_custom_rules,
+                )
+            else:
+                rsi_length_bt = 14
+                rsi_threshold_bt = 50.0
+                rsi_mode_bt = "RSI > Threshold"
+    
+            if use_supertrend_bt:
+                atr_period_bt = st.number_input("Supertrend ATR Period", min_value=5, max_value=50, value=10, step=1, disabled=use_custom_rules)
+                atr_multiplier_bt = st.number_input("Supertrend Multiplier", min_value=1.0, max_value=10.0, value=3.0, step=0.5, disabled=use_custom_rules)
+                supertrend_mode_bt = st.radio(
+                    "Supertrend Condition",
+                    options=["Green (Bullish)", "Red (Bearish)"],
+                    index=0,
+                    horizontal=True,
+                    disabled=use_custom_rules,
+                )
+            else:
+                atr_period_bt = 10
+                atr_multiplier_bt = 3.0
+                supertrend_mode_bt = "Green (Bullish)"
+
+        with st.expander("Exit Parameters", expanded=not use_custom_rules):
+            exit_mode_bt = st.selectbox(
+                "Exit Rule Type",
+                options=["Fixed Target/SL", "Indicator Flip", "Time-based"],
                 index=0,
-                horizontal=True,
                 disabled=use_custom_rules,
             )
-            ema_period_bt = st.number_input("EMA Period", min_value=50, max_value=400, value=200, step=5, disabled=use_custom_rules)
-        else:
-            ema_direction_bt = "Above EMA"
-            ema_period_bt = 200
-
-        if use_rsi_bt:
-            rsi_length_bt = st.number_input("RSI Length", min_value=2, max_value=200, value=14, step=1, disabled=use_custom_rules)
-            rsi_threshold_bt = st.number_input("RSI Threshold", min_value=1.0, max_value=99.0, value=50.0, step=1.0, disabled=use_custom_rules)
-            rsi_mode_bt = st.selectbox(
-                "RSI Condition",
-                options=["RSI > Threshold", "RSI < Threshold", "RSI Crosses Above", "RSI Crosses Below"],
-                index=0,
-                disabled=use_custom_rules,
-            )
-        else:
-            rsi_length_bt = 14
-            rsi_threshold_bt = 50.0
-            rsi_mode_bt = "RSI > Threshold"
-
-        if use_supertrend_bt:
-            atr_period_bt = st.number_input("Supertrend ATR Period", min_value=5, max_value=50, value=10, step=1, disabled=use_custom_rules)
-            atr_multiplier_bt = st.number_input("Supertrend Multiplier", min_value=1.0, max_value=10.0, value=3.0, step=0.5, disabled=use_custom_rules)
-            supertrend_mode_bt = st.radio(
-                "Supertrend Condition",
-                options=["Green (Bullish)", "Red (Bearish)"],
-                index=0,
-                horizontal=True,
-                disabled=use_custom_rules,
-            )
-        else:
-            atr_period_bt = 10
-            atr_multiplier_bt = 3.0
-            supertrend_mode_bt = "Green (Bullish)"
-
-        st.subheader("Exit Rules")
-        exit_mode_bt = st.selectbox(
-            "Exit Rule Type",
-            options=["Fixed Target/SL", "Indicator Flip", "Time-based"],
-            index=0,
-            disabled=use_custom_rules,
-        )
-        target_pct_bt = 5.0
-        stop_pct_bt = 3.0
-        hold_candles_bt = 5
-        exit_indicator_bt = "EMA"
-
-        if exit_mode_bt == "Fixed Target/SL":
-            target_pct_bt = st.number_input("Target %", min_value=0.5, max_value=50.0, value=5.0, step=0.5)
-            stop_pct_bt = st.number_input("Stop Loss %", min_value=0.5, max_value=50.0, value=3.0, step=0.5)
-        elif exit_mode_bt == "Indicator Flip":
-            exit_indicator_bt = st.selectbox(
-                "Flip Indicator",
-                options=["EMA", "RSI", "Supertrend"],
-                index=0,
-            )
-        else:
-            hold_candles_bt = st.number_input("Hold Candles", min_value=1, max_value=200, value=5, step=1)
+            target_pct_bt = 5.0
+            stop_pct_bt = 3.0
+            hold_candles_bt = 5
+            exit_indicator_bt = "EMA"
+    
+            if exit_mode_bt == "Fixed Target/SL":
+                target_pct_bt = st.number_input("Target %", min_value=0.5, max_value=50.0, value=5.0, step=0.5)
+                stop_pct_bt = st.number_input("Stop Loss %", min_value=0.5, max_value=50.0, value=3.0, step=0.5)
+            elif exit_mode_bt == "Indicator Flip":
+                exit_indicator_bt = st.selectbox(
+                    "Flip Indicator",
+                    options=["EMA", "RSI", "Supertrend"],
+                    index=0,
+                )
+            else:
+                hold_candles_bt = st.number_input("Hold Candles", min_value=1, max_value=200, value=5, step=1)
 
         st.subheader("Stock Selection")
         stock_input = st.text_input(
@@ -1966,10 +1992,41 @@ def main() -> None:
         trades_df = st.session_state.get("bt_trades", pd.DataFrame())
         if not stats_df.empty:
             st.subheader("Summary")
-            st.dataframe(stats_df, use_container_width=True, hide_index=True)
+            row = stats_df.iloc[0]
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Signals", f"{int(row.get('Total Signals', 0))}")
+            m2.metric("Win Rate", f"{row.get('Win Rate %', 0):.1f}%")
+            m3.metric("Avg Return", f"{row.get('Avg Return %', 0):.2f}%")
+            m4.metric("Cumulative", f"{row.get('Cumulative Return %', 0):.2f}%")
+            if not trades_df.empty and "Return %" in trades_df.columns:
+                equity = (trades_df["Return %"] / 100.0 + 1.0).cumprod()
+                equity_df = pd.DataFrame({"Equity": equity.values})
+                st.line_chart(equity_df, height=220)
+
         if not trades_df.empty:
             st.subheader("Trades")
-            st.dataframe(trades_df, use_container_width=True, height=520, hide_index=True)
+            trades_view = trades_df.copy()
+            display_cols = [
+                "Entry Date",
+                "Exit Date",
+                "Symbol",
+                "Direction",
+                "Entry Close",
+                "Exit Close",
+                "Return %",
+                "Exit Reason",
+                "Timeframe",
+            ]
+            display_cols = [c for c in display_cols if c in trades_view.columns]
+            trades_view = trades_view[display_cols]
+            st.dataframe(trades_view, use_container_width=True, height=520, hide_index=True)
+            st.download_button(
+                "Download Trades CSV",
+                data=trades_view.to_csv(index=False).encode("utf-8"),
+                file_name="backtest_trades.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
         return
     if nav_choice != "Scanner":
         st.info(f"{nav_choice} page is coming soon.")
