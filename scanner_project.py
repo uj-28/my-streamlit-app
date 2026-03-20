@@ -1524,6 +1524,7 @@ def main() -> None:
         ],
         default=[],
         help="Choose one or more filters to apply",
+        key="selected_filters_v2",
     )
     use_ema = "EMA Filter (Trend)" in selected_filters
     use_rsi = "RSI Filter (Momentum)" in selected_filters
