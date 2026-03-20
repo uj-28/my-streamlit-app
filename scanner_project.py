@@ -1387,6 +1387,122 @@ def scan_universe(
     return out
 
 
+def backtest_universe(
+    universe_name: str,
+    symbols: tuple[str, ...],
+    start_date: date | None,
+    end_date: date | None,
+    use_ema: bool,
+    ema_period: int,
+    ema_direction: str,
+    use_rsi: bool,
+    rsi_length: int,
+    rsi_threshold: float,
+    use_supertrend: bool,
+    atr_period: int,
+    atr_multiplier: float,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    trades: list[dict] = []
+
+    if not symbols:
+        return pd.DataFrame(), pd.DataFrame()
+
+    bulk_data = fetch_bulk_history(symbols, interval="1d", period="max")
+    ema_is_above = ema_direction == "Above EMA"
+
+    for symbol in symbols:
+        try:
+            if isinstance(bulk_data.columns, pd.MultiIndex):
+                if symbol not in bulk_data.columns.get_level_values(0):
+                    continue
+                data = bulk_data[symbol].dropna(how="all")
+            else:
+                data = bulk_data.copy()
+        except Exception:
+            continue
+
+        if data.empty:
+            continue
+
+        if start_date is not None:
+            data = data.loc[data.index >= pd.Timestamp(start_date)]
+        if end_date is not None:
+            data = data.loc[data.index <= pd.Timestamp(end_date)]
+
+        min_required = max(ema_period + 5, atr_period + 5, rsi_length + 20, 105)
+        if data.empty or len(data) < min_required + 2:
+            continue
+
+        close = ensure_series(data["Close"]).astype("float64")
+        high = ensure_series(data["High"]).astype("float64")
+        low = ensure_series(data["Low"]).astype("float64")
+
+        ohlc = pd.concat([high, low, close], axis=1, keys=["High", "Low", "Close"]).dropna()
+        if len(ohlc) < min_required + 2:
+            continue
+
+        high = ohlc["High"]
+        low = ohlc["Low"]
+        close = ohlc["Close"]
+
+        ema = close.ewm(span=ema_period, adjust=False).mean()
+        rsi = compute_rsi(close, period=rsi_length)
+        _, st_dir = compute_supertrend(
+            high=high,
+            low=low,
+            close=close,
+            atr_period=atr_period,
+            multiplier=atr_multiplier,
+        )
+
+        ema_cond = close > ema if ema_is_above else close < ema
+        rsi_cond = rsi > rsi_threshold
+        supertrend_cond = st_dir == 1
+
+        signal = pd.Series(True, index=close.index)
+        if use_ema:
+            signal &= ema_cond
+        if use_rsi:
+            signal &= rsi_cond
+        if use_supertrend:
+            signal &= supertrend_cond
+
+        next_close = close.shift(-1)
+        returns = (next_close / close) - 1.0
+        signal = signal & next_close.notna()
+
+        symbol_clean = symbol.replace(".NS", "")
+        for idx in signal.index[signal]:
+            trades.append(
+                {
+                    "Universe": universe_name,
+                    "Symbol": symbol_clean,
+                    "Signal Date": pd.Timestamp(idx).date().isoformat(),
+                    "Entry Close": float(close.loc[idx]),
+                    "Exit Close": float(next_close.loc[idx]),
+                    "Return %": round(float(returns.loc[idx]) * 100.0, 2),
+                }
+            )
+
+    if not trades:
+        return pd.DataFrame(), pd.DataFrame()
+
+    trades_df = pd.DataFrame(trades)
+    trades_df.sort_values(["Signal Date", "Symbol"], inplace=True, ignore_index=True)
+
+    stats = {
+        "Total Signals": int(len(trades_df)),
+        "Win Rate %": round(float((trades_df["Return %"] > 0).mean() * 100.0), 2),
+        "Avg Return %": round(float(trades_df["Return %"].mean()), 2),
+        "Median Return %": round(float(trades_df["Return %"].median()), 2),
+        "Best Return %": round(float(trades_df["Return %"].max()), 2),
+        "Worst Return %": round(float(trades_df["Return %"].min()), 2),
+        "Cumulative Return %": round(float(((trades_df["Return %"] / 100.0 + 1.0).prod() - 1.0) * 100.0), 2),
+    }
+    stats_df = pd.DataFrame([stats])
+    return stats_df, trades_df
+
+
 def main() -> None:
     st.set_page_config(page_title="Indian Index Daily Scanner", layout="wide", initial_sidebar_state="expanded")
     apply_ui_style()
@@ -1440,6 +1556,127 @@ def main() -> None:
         ai_cols = [c for c in ai_cols if c in table.columns]
         ai_table = table[ai_cols].copy()
         st.dataframe(ai_table, use_container_width=True, height=520, hide_index=True)
+        return
+    if nav_choice == "Backtest":
+        st.header("Backtest")
+        st.caption("Run a simple signal backtest over a custom date range.")
+
+        universe_mode_bt = st.radio(
+            "Stock Source",
+            options=["Universe", "Upload File"],
+            index=0,
+            horizontal=True,
+            key="bt_universe_mode",
+        )
+        universe_bt = st.selectbox(
+            "Select Index/Universe",
+            options=UNIVERSE_OPTIONS,
+            index=0,
+            key="bt_universe",
+            disabled=universe_mode_bt != "Universe",
+        )
+        uploaded_file_bt = st.file_uploader(
+            "Upload Symbols (CSV/XLSX)",
+            type=["csv", "xlsx", "xls"],
+            key="bt_upload",
+            disabled=universe_mode_bt != "Upload File",
+        )
+        if universe_mode_bt == "Upload File" and uploaded_file_bt is not None:
+            universe_symbols_bt = load_symbols_from_file(uploaded_file_bt)
+            universe_source_bt = f"Uploaded file: {uploaded_file_bt.name}"
+        else:
+            universe_symbols_bt, universe_source_bt = resolve_universe(universe_bt)
+
+        use_max_history = st.checkbox("Use Max History (from beginning)", value=False)
+        if use_max_history:
+            start_date = None
+            end_date = None
+            st.caption("Using full available history.")
+        else:
+            today = datetime.now().date()
+            default_start = today.replace(year=today.year - 2)
+            date_range = st.date_input(
+                "Select Date Range",
+                value=(default_start, today),
+            )
+            if isinstance(date_range, tuple) and len(date_range) == 2:
+                start_date, end_date = date_range
+            else:
+                start_date = None
+                end_date = None
+
+        st.subheader("Filters")
+        selected_filters_bt = st.multiselect(
+            "Select Filters",
+            options=[
+                "EMA Filter (Trend)",
+                "RSI Filter (Momentum)",
+                "Supertrend Filter (Support/Resistance)",
+            ],
+            default=["EMA Filter (Trend)"],
+        )
+        use_ema_bt = "EMA Filter (Trend)" in selected_filters_bt
+        use_rsi_bt = "RSI Filter (Momentum)" in selected_filters_bt
+        use_supertrend_bt = "Supertrend Filter (Support/Resistance)" in selected_filters_bt
+
+        if use_ema_bt:
+            ema_direction_bt = st.radio(
+                "EMA Condition",
+                options=["Below EMA", "Above EMA"],
+                index=0,
+                horizontal=True,
+            )
+            ema_period_bt = st.number_input("EMA Period", min_value=50, max_value=400, value=200, step=5)
+        else:
+            ema_direction_bt = "Above EMA"
+            ema_period_bt = 200
+
+        if use_rsi_bt:
+            rsi_length_bt = st.number_input("RSI Length", min_value=2, max_value=200, value=14, step=1)
+            rsi_threshold_bt = st.number_input("RSI Threshold", min_value=1.0, max_value=99.0, value=50.0, step=1.0)
+        else:
+            rsi_length_bt = 14
+            rsi_threshold_bt = 50.0
+
+        if use_supertrend_bt:
+            atr_period_bt = st.number_input("Supertrend ATR Period", min_value=5, max_value=50, value=10, step=1)
+            atr_multiplier_bt = st.number_input("Supertrend Multiplier", min_value=1.0, max_value=10.0, value=3.0, step=0.5)
+        else:
+            atr_period_bt = 10
+            atr_multiplier_bt = 3.0
+
+        if st.button("Run Backtest", type="primary"):
+            if not universe_symbols_bt:
+                st.error("No symbols available for backtest.")
+                return
+            with st.spinner("Running backtest..."):
+                stats_df, trades_df = backtest_universe(
+                    universe_name=universe_bt if universe_mode_bt == "Universe" else "Uploaded Symbols",
+                    symbols=tuple(universe_symbols_bt),
+                    start_date=start_date,
+                    end_date=end_date,
+                    use_ema=use_ema_bt,
+                    ema_period=ema_period_bt,
+                    ema_direction=ema_direction_bt,
+                    use_rsi=use_rsi_bt,
+                    rsi_length=rsi_length_bt,
+                    rsi_threshold=rsi_threshold_bt,
+                    use_supertrend=use_supertrend_bt,
+                    atr_period=atr_period_bt,
+                    atr_multiplier=atr_multiplier_bt,
+                )
+            st.session_state["bt_stats"] = stats_df
+            st.session_state["bt_trades"] = trades_df
+            st.session_state["bt_source"] = universe_source_bt
+
+        stats_df = st.session_state.get("bt_stats", pd.DataFrame())
+        trades_df = st.session_state.get("bt_trades", pd.DataFrame())
+        if not stats_df.empty:
+            st.subheader("Summary")
+            st.dataframe(stats_df, use_container_width=True, hide_index=True)
+        if not trades_df.empty:
+            st.subheader("Trades")
+            st.dataframe(trades_df, use_container_width=True, height=520, hide_index=True)
         return
     if nav_choice != "Scanner":
         st.info(f"{nav_choice} page is coming soon.")
