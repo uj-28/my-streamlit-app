@@ -1,6 +1,7 @@
 from datetime import datetime, time
 from io import StringIO
 import difflib
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -1412,6 +1413,8 @@ def backtest_universe(
     target_pct: float,
     stop_pct: float,
     hold_candles: int,
+    entry_expr: str | None,
+    exit_expr: str | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     trades: list[dict] = []
 
@@ -1459,8 +1462,41 @@ def backtest_universe(
         low = ohlc["Low"]
         close = ohlc["Close"]
 
-        ema = close.ewm(span=ema_period, adjust=False).mean()
-        rsi = compute_rsi(close, period=rsi_length)
+        indicator_cache: dict[str, pd.Series] = {}
+
+        def ema_fn(length: int) -> pd.Series:
+            key = f"ema_{length}"
+            if key not in indicator_cache:
+                indicator_cache[key] = close.ewm(span=length, adjust=False).mean()
+            return indicator_cache[key]
+
+        def rsi_fn(length: int) -> pd.Series:
+            key = f"rsi_{length}"
+            if key not in indicator_cache:
+                indicator_cache[key] = compute_rsi(close, period=length)
+            return indicator_cache[key]
+
+        def supertrend_fn(atr_len: int, mult: float) -> pd.Series:
+            key = f"st_{atr_len}_{mult}"
+            if key not in indicator_cache:
+                _, st_local = compute_supertrend(
+                    high=high,
+                    low=low,
+                    close=close,
+                    atr_period=atr_len,
+                    multiplier=mult,
+                )
+                indicator_cache[key] = st_local
+            return indicator_cache[key]
+
+        def cross_above(a: pd.Series, b: pd.Series) -> pd.Series:
+            return (a.shift(1) <= b.shift(1)) & (a > b)
+
+        def cross_below(a: pd.Series, b: pd.Series) -> pd.Series:
+            return (a.shift(1) >= b.shift(1)) & (a < b)
+
+        ema = ema_fn(ema_period)
+        rsi = rsi_fn(rsi_length)
         _, st_dir = compute_supertrend(
             high=high,
             low=low,
@@ -1469,26 +1505,61 @@ def backtest_universe(
             multiplier=atr_multiplier,
         )
 
-        ema_cond = close > ema if ema_is_above else close < ema
+        def build_signal(expr: str) -> pd.Series:
+            expr_clean = expr.strip()
+            if not expr_clean:
+                raise ValueError("Rule cannot be empty.")
+            expr_clean = re.sub(r"\\bcrosses\\s+above\\b", "cross_above", expr_clean, flags=re.IGNORECASE)
+            expr_clean = re.sub(r"\\bcrosses\\s+below\\b", "cross_below", expr_clean, flags=re.IGNORECASE)
+            expr_clean = re.sub(r"\\band\\b", "&", expr_clean, flags=re.IGNORECASE)
+            expr_clean = re.sub(r"\\bor\\b", "|", expr_clean, flags=re.IGNORECASE)
+            expr_clean = re.sub(r"\\bgreen\\b", "1", expr_clean, flags=re.IGNORECASE)
+            expr_clean = re.sub(r"\\bred\\b", "-1", expr_clean, flags=re.IGNORECASE)
+            env = {
+                "close": close,
+                "open": ensure_series(data["Open"]).astype("float64"),
+                "high": high,
+                "low": low,
+                "volume": ensure_series(data["Volume"]).astype("float64"),
+                "ema": ema_fn,
+                "rsi": rsi_fn,
+                "supertrend": supertrend_fn,
+                "cross_above": cross_above,
+                "cross_below": cross_below,
+            }
+            try:
+                result = eval(expr_clean, {"__builtins__": {}}, env)
+            except Exception as exc:
+                raise ValueError(f"Invalid rule: {exc}") from exc
+            if isinstance(result, pd.Series):
+                return result.fillna(False).astype(bool)
+            raise ValueError("Rule did not produce a series result.")
 
-        if rsi_mode == "RSI > Threshold":
-            rsi_cond = rsi > rsi_threshold
-        elif rsi_mode == "RSI < Threshold":
-            rsi_cond = rsi < rsi_threshold
-        elif rsi_mode == "RSI Crosses Above":
-            rsi_cond = (rsi.shift(1) <= rsi_threshold) & (rsi > rsi_threshold)
+        if entry_expr:
+            signal = build_signal(entry_expr)
+            exit_signal = build_signal(exit_expr) if exit_expr else None
         else:
-            rsi_cond = (rsi.shift(1) >= rsi_threshold) & (rsi < rsi_threshold)
+            ema_cond = close > ema if ema_is_above else close < ema
 
-        supertrend_cond = st_dir == (1 if supertrend_mode == "Green (Bullish)" else -1)
+            if rsi_mode == "RSI > Threshold":
+                rsi_cond = rsi > rsi_threshold
+            elif rsi_mode == "RSI < Threshold":
+                rsi_cond = rsi < rsi_threshold
+            elif rsi_mode == "RSI Crosses Above":
+                rsi_cond = (rsi.shift(1) <= rsi_threshold) & (rsi > rsi_threshold)
+            else:
+                rsi_cond = (rsi.shift(1) >= rsi_threshold) & (rsi < rsi_threshold)
 
-        signal = pd.Series(True, index=close.index)
-        if use_ema:
-            signal &= ema_cond
-        if use_rsi:
-            signal &= rsi_cond
-        if use_supertrend:
-            signal &= supertrend_cond
+            supertrend_cond = st_dir == (1 if supertrend_mode == "Green (Bullish)" else -1)
+
+            signal = pd.Series(True, index=close.index)
+            if use_ema:
+                signal &= ema_cond
+            if use_rsi:
+                signal &= rsi_cond
+            if use_supertrend:
+                signal &= supertrend_cond
+            exit_signal = None
 
         symbol_clean = symbol.replace(".NS", "")
         in_trade = False
@@ -1517,7 +1588,10 @@ def backtest_universe(
             exit_reason = ""
             is_short = entry_is_short if trade_direction == "Auto (Supertrend)" else trade_direction == "Short"
 
-            if exit_mode == "Fixed Target/SL":
+            if exit_signal is not None and bool(exit_signal.loc[idx]):
+                exit_now = True
+                exit_reason = "Custom Exit"
+            elif exit_mode == "Fixed Target/SL":
                 if is_short:
                     curr_ret = (entry_price / float(close.loc[idx]) - 1.0) * 100.0
                 else:
@@ -1697,6 +1771,14 @@ def main() -> None:
                 end_date = None
 
         st.subheader("Entry Rules")
+        use_custom_rules = st.checkbox("Use Custom Rule Logic (Pine-like)", value=False)
+        entry_expr = ""
+        exit_expr = ""
+        if use_custom_rules:
+            st.caption("Example: rsi(14) crosses above 50 and close > ema(200) and supertrend(10,3) == green")
+            entry_expr = st.text_area("Entry Rule", height=90)
+            exit_expr = st.text_area("Exit Rule", height=90)
+
         selected_filters_bt = st.multiselect(
             "Select Filters",
             options=[
@@ -1705,6 +1787,7 @@ def main() -> None:
                 "Supertrend Filter (Support/Resistance)",
             ],
             default=["EMA Filter (Trend)"],
+            disabled=use_custom_rules,
         )
         trade_direction_bt = st.selectbox(
             "Trade Direction",
@@ -1721,19 +1804,21 @@ def main() -> None:
                 options=["Below EMA", "Above EMA"],
                 index=0,
                 horizontal=True,
+                disabled=use_custom_rules,
             )
-            ema_period_bt = st.number_input("EMA Period", min_value=50, max_value=400, value=200, step=5)
+            ema_period_bt = st.number_input("EMA Period", min_value=50, max_value=400, value=200, step=5, disabled=use_custom_rules)
         else:
             ema_direction_bt = "Above EMA"
             ema_period_bt = 200
 
         if use_rsi_bt:
-            rsi_length_bt = st.number_input("RSI Length", min_value=2, max_value=200, value=14, step=1)
-            rsi_threshold_bt = st.number_input("RSI Threshold", min_value=1.0, max_value=99.0, value=50.0, step=1.0)
+            rsi_length_bt = st.number_input("RSI Length", min_value=2, max_value=200, value=14, step=1, disabled=use_custom_rules)
+            rsi_threshold_bt = st.number_input("RSI Threshold", min_value=1.0, max_value=99.0, value=50.0, step=1.0, disabled=use_custom_rules)
             rsi_mode_bt = st.selectbox(
                 "RSI Condition",
                 options=["RSI > Threshold", "RSI < Threshold", "RSI Crosses Above", "RSI Crosses Below"],
                 index=0,
+                disabled=use_custom_rules,
             )
         else:
             rsi_length_bt = 14
@@ -1741,13 +1826,14 @@ def main() -> None:
             rsi_mode_bt = "RSI > Threshold"
 
         if use_supertrend_bt:
-            atr_period_bt = st.number_input("Supertrend ATR Period", min_value=5, max_value=50, value=10, step=1)
-            atr_multiplier_bt = st.number_input("Supertrend Multiplier", min_value=1.0, max_value=10.0, value=3.0, step=0.5)
+            atr_period_bt = st.number_input("Supertrend ATR Period", min_value=5, max_value=50, value=10, step=1, disabled=use_custom_rules)
+            atr_multiplier_bt = st.number_input("Supertrend Multiplier", min_value=1.0, max_value=10.0, value=3.0, step=0.5, disabled=use_custom_rules)
             supertrend_mode_bt = st.radio(
                 "Supertrend Condition",
                 options=["Green (Bullish)", "Red (Bearish)"],
                 index=0,
                 horizontal=True,
+                disabled=use_custom_rules,
             )
         else:
             atr_period_bt = 10
@@ -1759,6 +1845,7 @@ def main() -> None:
             "Exit Rule Type",
             options=["Fixed Target/SL", "Indicator Flip", "Time-based"],
             index=0,
+            disabled=use_custom_rules,
         )
         target_pct_bt = 5.0
         stop_pct_bt = 3.0
@@ -1813,32 +1900,41 @@ def main() -> None:
             if not selected_symbol:
                 st.error("Please enter a valid stock symbol with .NS.")
                 return
+            if use_custom_rules and not entry_expr.strip():
+                st.error("Please enter a custom Entry Rule.")
+                return
             with st.spinner("Running backtest..."):
-                stats_df, trades_df = backtest_universe(
-                    universe_name=selected_symbol.replace(".NS", ""),
-                    symbols=(selected_symbol,),
-                    timeframe_label=timeframe_label_bt,
-                    resample_rule=resample_rule_bt,
-                    start_date=start_date,
-                    end_date=end_date,
-                    trade_direction=trade_direction_bt,
-                    use_ema=use_ema_bt,
-                    ema_period=ema_period_bt,
-                    ema_direction=ema_direction_bt,
-                    use_rsi=use_rsi_bt,
-                    rsi_length=rsi_length_bt,
-                    rsi_threshold=rsi_threshold_bt,
-                    rsi_mode=rsi_mode_bt,
-                    use_supertrend=use_supertrend_bt,
-                    supertrend_mode=supertrend_mode_bt,
-                    atr_period=atr_period_bt,
-                    atr_multiplier=atr_multiplier_bt,
-                    exit_mode=exit_mode_bt,
-                    exit_indicator=exit_indicator_bt,
-                    target_pct=target_pct_bt,
-                    stop_pct=stop_pct_bt,
-                    hold_candles=int(hold_candles_bt),
-                )
+                try:
+                    stats_df, trades_df = backtest_universe(
+                        universe_name=selected_symbol.replace(".NS", ""),
+                        symbols=(selected_symbol,),
+                        timeframe_label=timeframe_label_bt,
+                        resample_rule=resample_rule_bt,
+                        start_date=start_date,
+                        end_date=end_date,
+                        trade_direction=trade_direction_bt,
+                        use_ema=use_ema_bt,
+                        ema_period=ema_period_bt,
+                        ema_direction=ema_direction_bt,
+                        use_rsi=use_rsi_bt,
+                        rsi_length=rsi_length_bt,
+                        rsi_threshold=rsi_threshold_bt,
+                        rsi_mode=rsi_mode_bt,
+                        use_supertrend=use_supertrend_bt,
+                        supertrend_mode=supertrend_mode_bt,
+                        atr_period=atr_period_bt,
+                        atr_multiplier=atr_multiplier_bt,
+                        exit_mode=exit_mode_bt,
+                        exit_indicator=exit_indicator_bt,
+                        target_pct=target_pct_bt,
+                        stop_pct=stop_pct_bt,
+                        hold_candles=int(hold_candles_bt),
+                        entry_expr=entry_expr if use_custom_rules else None,
+                        exit_expr=exit_expr if use_custom_rules else None,
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                    return
             st.session_state["bt_stats"] = stats_df
             st.session_state["bt_trades"] = trades_df
             st.session_state["bt_source"] = universe_source_bt
