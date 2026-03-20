@@ -1391,6 +1391,8 @@ def scan_universe(
 def backtest_universe(
     universe_name: str,
     symbols: tuple[str, ...],
+    timeframe_label: str,
+    resample_rule: str | None,
     start_date: date | None,
     end_date: date | None,
     use_ema: bool,
@@ -1399,9 +1401,16 @@ def backtest_universe(
     use_rsi: bool,
     rsi_length: int,
     rsi_threshold: float,
+    rsi_mode: str,
     use_supertrend: bool,
+    supertrend_mode: str,
     atr_period: int,
     atr_multiplier: float,
+    exit_mode: str,
+    exit_indicator: str,
+    target_pct: float,
+    stop_pct: float,
+    hold_candles: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     trades: list[dict] = []
 
@@ -1424,6 +1433,9 @@ def backtest_universe(
 
         if data.empty:
             continue
+
+        if resample_rule:
+            data = resample_ohlcv(data, resample_rule)
 
         if start_date is not None:
             data = data.loc[data.index >= pd.Timestamp(start_date)]
@@ -1457,8 +1469,17 @@ def backtest_universe(
         )
 
         ema_cond = close > ema if ema_is_above else close < ema
-        rsi_cond = rsi > rsi_threshold
-        supertrend_cond = st_dir == 1
+
+        if rsi_mode == "RSI > Threshold":
+            rsi_cond = rsi > rsi_threshold
+        elif rsi_mode == "RSI < Threshold":
+            rsi_cond = rsi < rsi_threshold
+        elif rsi_mode == "RSI Crosses Above":
+            rsi_cond = (rsi.shift(1) <= rsi_threshold) & (rsi > rsi_threshold)
+        else:
+            rsi_cond = (rsi.shift(1) >= rsi_threshold) & (rsi < rsi_threshold)
+
+        supertrend_cond = st_dir == (1 if supertrend_mode == "Green (Bullish)" else -1)
 
         signal = pd.Series(True, index=close.index)
         if use_ema:
@@ -1468,28 +1489,74 @@ def backtest_universe(
         if use_supertrend:
             signal &= supertrend_cond
 
-        next_close = close.shift(-1)
-        returns = (next_close / close) - 1.0
-        signal = signal & next_close.notna()
-
         symbol_clean = symbol.replace(".NS", "")
-        for idx in signal.index[signal]:
-            trades.append(
-                {
-                    "Universe": universe_name,
-                    "Symbol": symbol_clean,
-                    "Signal Date": pd.Timestamp(idx).date().isoformat(),
-                    "Entry Close": float(close.loc[idx]),
-                    "Exit Close": float(next_close.loc[idx]),
-                    "Return %": round(float(returns.loc[idx]) * 100.0, 2),
-                }
-            )
+        in_trade = False
+        entry_idx = None
+        entry_price = None
+
+        for idx in signal.index:
+            if not in_trade:
+                if bool(signal.loc[idx]) and pd.notna(close.loc[idx]):
+                    in_trade = True
+                    entry_idx = idx
+                    entry_price = float(close.loc[idx])
+                continue
+
+            if entry_idx is None or entry_price is None:
+                in_trade = False
+                continue
+
+            exit_now = False
+            exit_reason = ""
+
+            if exit_mode == "Fixed Target/SL":
+                curr_ret = (float(close.loc[idx]) / entry_price - 1.0) * 100.0
+                if curr_ret >= target_pct:
+                    exit_now = True
+                    exit_reason = f"Target {target_pct:g}%"
+                elif curr_ret <= -abs(stop_pct):
+                    exit_now = True
+                    exit_reason = f"Stop {-abs(stop_pct):g}%"
+            elif exit_mode == "Indicator Flip":
+                if exit_indicator == "EMA":
+                    exit_now = not bool(ema_cond.loc[idx])
+                elif exit_indicator == "RSI":
+                    exit_now = not bool(rsi_cond.loc[idx])
+                else:
+                    exit_now = not bool(supertrend_cond.loc[idx])
+                exit_reason = f"{exit_indicator} Flip"
+            else:
+                if entry_idx is not None:
+                    held = (signal.index.get_loc(idx) - signal.index.get_loc(entry_idx))
+                    if held >= max(hold_candles, 1):
+                        exit_now = True
+                        exit_reason = f"Time {hold_candles} candles"
+
+            if exit_now:
+                exit_price = float(close.loc[idx])
+                ret_pct = (exit_price / entry_price - 1.0) * 100.0
+                trades.append(
+                    {
+                        "Universe": universe_name,
+                        "Symbol": symbol_clean,
+                        "Entry Date": pd.Timestamp(entry_idx).date().isoformat(),
+                        "Exit Date": pd.Timestamp(idx).date().isoformat(),
+                        "Entry Close": round(entry_price, 2),
+                        "Exit Close": round(exit_price, 2),
+                        "Return %": round(ret_pct, 2),
+                        "Exit Reason": exit_reason,
+                        "Timeframe": timeframe_label,
+                    }
+                )
+                in_trade = False
+                entry_idx = None
+                entry_price = None
 
     if not trades:
         return pd.DataFrame(), pd.DataFrame()
 
     trades_df = pd.DataFrame(trades)
-    trades_df.sort_values(["Signal Date", "Symbol"], inplace=True, ignore_index=True)
+    trades_df.sort_values(["Entry Date", "Symbol"], inplace=True, ignore_index=True)
 
     stats = {
         "Total Signals": int(len(trades_df)),
@@ -1560,7 +1627,7 @@ def main() -> None:
         return
     if nav_choice == "Backtest":
         st.header("Backtest")
-        st.caption("Run a simple signal backtest over a custom date range.")
+        st.caption("Run a custom-rule backtest over a date range or max history.")
 
         universe_mode_bt = st.radio(
             "Stock Source",
@@ -1588,6 +1655,14 @@ def main() -> None:
         else:
             universe_symbols_bt, universe_source_bt = resolve_universe(universe_bt)
 
+        timeframe_bt = st.selectbox(
+            "Timeframe",
+            options=["Daily", "Weekly"],
+            index=0,
+        )
+        resample_rule_bt = "W-FRI" if timeframe_bt == "Weekly" else None
+        timeframe_label_bt = "1W" if timeframe_bt == "Weekly" else "1D"
+
         use_max_history = st.checkbox("Use Max History (from beginning)", value=False)
         if use_max_history:
             start_date = None
@@ -1606,7 +1681,7 @@ def main() -> None:
                 start_date = None
                 end_date = None
 
-        st.subheader("Filters")
+        st.subheader("Entry Rules")
         selected_filters_bt = st.multiselect(
             "Select Filters",
             options=[
@@ -1635,16 +1710,52 @@ def main() -> None:
         if use_rsi_bt:
             rsi_length_bt = st.number_input("RSI Length", min_value=2, max_value=200, value=14, step=1)
             rsi_threshold_bt = st.number_input("RSI Threshold", min_value=1.0, max_value=99.0, value=50.0, step=1.0)
+            rsi_mode_bt = st.selectbox(
+                "RSI Condition",
+                options=["RSI > Threshold", "RSI < Threshold", "RSI Crosses Above", "RSI Crosses Below"],
+                index=0,
+            )
         else:
             rsi_length_bt = 14
             rsi_threshold_bt = 50.0
+            rsi_mode_bt = "RSI > Threshold"
 
         if use_supertrend_bt:
             atr_period_bt = st.number_input("Supertrend ATR Period", min_value=5, max_value=50, value=10, step=1)
             atr_multiplier_bt = st.number_input("Supertrend Multiplier", min_value=1.0, max_value=10.0, value=3.0, step=0.5)
+            supertrend_mode_bt = st.radio(
+                "Supertrend Condition",
+                options=["Green (Bullish)", "Red (Bearish)"],
+                index=0,
+                horizontal=True,
+            )
         else:
             atr_period_bt = 10
             atr_multiplier_bt = 3.0
+            supertrend_mode_bt = "Green (Bullish)"
+
+        st.subheader("Exit Rules")
+        exit_mode_bt = st.selectbox(
+            "Exit Rule Type",
+            options=["Fixed Target/SL", "Indicator Flip", "Time-based"],
+            index=0,
+        )
+        target_pct_bt = 5.0
+        stop_pct_bt = 3.0
+        hold_candles_bt = 5
+        exit_indicator_bt = "EMA"
+
+        if exit_mode_bt == "Fixed Target/SL":
+            target_pct_bt = st.number_input("Target %", min_value=0.5, max_value=50.0, value=5.0, step=0.5)
+            stop_pct_bt = st.number_input("Stop Loss %", min_value=0.5, max_value=50.0, value=3.0, step=0.5)
+        elif exit_mode_bt == "Indicator Flip":
+            exit_indicator_bt = st.selectbox(
+                "Flip Indicator",
+                options=["EMA", "RSI", "Supertrend"],
+                index=0,
+            )
+        else:
+            hold_candles_bt = st.number_input("Hold Candles", min_value=1, max_value=200, value=5, step=1)
 
         st.subheader("Stock Selection")
         stock_input = st.text_input(
@@ -1686,6 +1797,8 @@ def main() -> None:
                 stats_df, trades_df = backtest_universe(
                     universe_name=selected_symbol.replace(".NS", ""),
                     symbols=(selected_symbol,),
+                    timeframe_label=timeframe_label_bt,
+                    resample_rule=resample_rule_bt,
                     start_date=start_date,
                     end_date=end_date,
                     use_ema=use_ema_bt,
@@ -1694,9 +1807,16 @@ def main() -> None:
                     use_rsi=use_rsi_bt,
                     rsi_length=rsi_length_bt,
                     rsi_threshold=rsi_threshold_bt,
+                    rsi_mode=rsi_mode_bt,
                     use_supertrend=use_supertrend_bt,
+                    supertrend_mode=supertrend_mode_bt,
                     atr_period=atr_period_bt,
                     atr_multiplier=atr_multiplier_bt,
+                    exit_mode=exit_mode_bt,
+                    exit_indicator=exit_indicator_bt,
+                    target_pct=target_pct_bt,
+                    stop_pct=stop_pct_bt,
+                    hold_candles=int(hold_candles_bt),
                 )
             st.session_state["bt_stats"] = stats_df
             st.session_state["bt_trades"] = trades_df
