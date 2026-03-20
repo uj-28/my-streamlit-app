@@ -1509,8 +1509,18 @@ def backtest_universe(
             expr_clean = expr.strip()
             if not expr_clean:
                 raise ValueError("Rule cannot be empty.")
-            expr_clean = re.sub(r"\\bcrosses\\s+above\\b", "cross_above", expr_clean, flags=re.IGNORECASE)
-            expr_clean = re.sub(r"\\bcrosses\\s+below\\b", "cross_below", expr_clean, flags=re.IGNORECASE)
+            expr_clean = re.sub(
+                r"(\\b[^()]+?\\b)\\s+crosses\\s+above\\s+(\\b[^()]+?\\b)",
+                r"cross_above(\\1, \\2)",
+                expr_clean,
+                flags=re.IGNORECASE,
+            )
+            expr_clean = re.sub(
+                r"(\\b[^()]+?\\b)\\s+crosses\\s+below\\s+(\\b[^()]+?\\b)",
+                r"cross_below(\\1, \\2)",
+                expr_clean,
+                flags=re.IGNORECASE,
+            )
             expr_clean = re.sub(r"\\band\\b", "&", expr_clean, flags=re.IGNORECASE)
             expr_clean = re.sub(r"\\bor\\b", "|", expr_clean, flags=re.IGNORECASE)
             expr_clean = re.sub(r"\\bgreen\\b", "1", expr_clean, flags=re.IGNORECASE)
