@@ -691,7 +691,10 @@ def load_symbols_from_file(uploaded_file) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-@st.cache_data(ttl=21600, show_spinner=False)
+UNIVERSE_REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60
+
+
+@st.cache_data(ttl=UNIVERSE_REFRESH_TTL_SECONDS, show_spinner=False)
 def resolve_universe(universe: str) -> tuple[list[str], str]:
     """Return tickers and source note for selected universe."""
     if universe in NSE_INDEX_CSV_FILES:
@@ -1117,6 +1120,7 @@ def scan_universe(
     rsi_threshold: float,
     rsi_length: int,
     ema_period: int,
+    ema_direction: str,
     atr_period: int,
     atr_multiplier: float,
     halftrend_amplitude: int,
@@ -1130,7 +1134,9 @@ def scan_universe(
     ai_cache_key: str,
 ) -> pd.DataFrame:
     results = []
-    cond_ema_col = f"Close > EMA{ema_period}"
+    ema_is_above = ema_direction == "Above EMA"
+    ema_op = ">" if ema_is_above else "<"
+    cond_ema_col = f"Close {ema_op} EMA{ema_period}"
     cond_rsi_col = f"RSI({rsi_length}) > {rsi_threshold:g}"
     failed_symbols = []
     ai_feature_rows: dict[str, pd.Series] = {}
@@ -1238,7 +1244,7 @@ def scan_universe(
         latest_ht_buy = bool(ht_buy.loc[signal_idx]) if pd.notna(ht_buy.loc[signal_idx]) else False
         latest_ht_sell = bool(ht_sell.loc[signal_idx]) if pd.notna(ht_sell.loc[signal_idx]) else False
 
-        ema_cond = latest_close > latest_ema
+        ema_cond = latest_close > latest_ema if ema_is_above else latest_close < latest_ema
         rsi_cond = latest_rsi is not None and latest_rsi > rsi_threshold
         supertrend_cond = latest_st_dir == 1
         ema_ok = ema_cond if use_ema else True
@@ -1438,7 +1444,7 @@ def main() -> None:
         value=False,
         help="Train an XGBoost model and add probability-based AI signals",
     )
-    use_ema = st.sidebar.toggle("📈 Use EMA Filter (Trend)", value=False, help="Price must be above EMA to qualify")
+    use_ema = st.sidebar.toggle("📈 Use EMA Filter (Trend)", value=False, help="Price must be above or below EMA based on the selected condition")
     use_rsi = st.sidebar.toggle("📊 Use RSI Filter (Momentum)", value=False, help="RSI must exceed threshold")
     use_supertrend = st.sidebar.toggle("📉 Use Supertrend Filter (Support/Resistance)", value=False, help="Must be in green/bullish mode")
 
@@ -1451,6 +1457,13 @@ def main() -> None:
     )
     st.sidebar.subheader("⚙️ Indicator Parameters")
     if use_ema:
+        ema_direction = st.sidebar.radio(
+            "EMA Condition",
+            options=["Below EMA", "Above EMA"],
+            index=0,
+            horizontal=True,
+            help="Choose whether price must be below or above EMA to qualify",
+        )
         ema_period = st.sidebar.number_input(
             "EMA Period",
             min_value=50,
@@ -1460,6 +1473,7 @@ def main() -> None:
             help="Exponential Moving Average period (larger = longer trend)"
         )
     else:
+        ema_direction = "Above EMA"
         ema_period = 200
 
     if use_rsi:
@@ -1561,6 +1575,7 @@ def main() -> None:
             "use_last_closed_candle": use_last_closed_candle,
             "rsi_length": rsi_length,
             "show_halftrend": show_halftrend,
+            "ema_direction": ema_direction,
         }
 
     if run_scan:
@@ -1586,6 +1601,7 @@ def main() -> None:
                 rsi_threshold=rsi_threshold,
                 rsi_length=rsi_length,
                 ema_period=ema_period,
+                ema_direction=ema_direction,
                 atr_period=atr_period,
                 atr_multiplier=atr_multiplier,
                 halftrend_amplitude=int(halftrend_amplitude),
@@ -1613,6 +1629,7 @@ def main() -> None:
             "use_last_closed_candle": use_last_closed_candle,
             "rsi_length": rsi_length,
             "show_halftrend": show_halftrend,
+            "ema_direction": ema_direction,
         }
 
     table = st.session_state.scan_table
@@ -1623,7 +1640,12 @@ def main() -> None:
     scan_meta = st.session_state.get("scan_meta", {})
     rsi_len_meta = int(scan_meta.get("rsi_length", rsi_length))
     ema_col = next((c for c in table.columns if c.startswith("EMA")), f"EMA{ema_period}")
-    cond_ema_col = next((c for c in table.columns if c.startswith("Close > EMA")), f"Close > EMA{ema_period}")
+    ema_direction_meta = scan_meta.get("ema_direction", "Above EMA")
+    ema_op = ">" if ema_direction_meta == "Above EMA" else "<"
+    cond_ema_col = next(
+        (c for c in table.columns if c.startswith("Close ") and "EMA" in c),
+        f"Close {ema_op} EMA{ema_period}",
+    )
     cond_rsi_col = next((c for c in table.columns if c.startswith("RSI(")), f"RSI({rsi_len_meta}) > {rsi_threshold:g}")
     condition_cols = [
         col
@@ -1650,7 +1672,7 @@ def main() -> None:
     ai_enabled_meta = bool(scan_meta.get("enable_ai", False))
 
     if use_ema_meta:
-        active_filters.append(f"EMA({ema_col})")
+        active_filters.append(cond_ema_col)
     if use_rsi_meta:
         active_filters.append(cond_rsi_col)
     if use_supertrend_meta:
