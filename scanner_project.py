@@ -1,5 +1,6 @@
 from datetime import datetime, time
 from io import StringIO
+import difflib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -1645,14 +1646,46 @@ def main() -> None:
             atr_period_bt = 10
             atr_multiplier_bt = 3.0
 
+        st.subheader("Stock Selection")
+        stock_input = st.text_input(
+            "Enter Stock Symbol (must end with .NS)",
+            placeholder="Example: TCS.NS",
+        ).strip().upper()
+
+        available_symbols = universe_symbols_bt or []
+        available_set = set(available_symbols)
+        selected_symbol = None
+
+        if stock_input:
+            if not stock_input.endswith(".NS"):
+                st.error("Please type correct name with .NS (e.g., TCS.NS).")
+                base = stock_input.replace(".NS", "")
+                candidates = [s.replace(".NS", "") for s in available_symbols]
+                suggestions = difflib.get_close_matches(base, candidates, n=5, cutoff=0.6)
+                if suggestions:
+                    st.caption("Did you mean: " + ", ".join(f"{s}.NS" for s in suggestions))
+            else:
+                if available_set and stock_input not in available_set:
+                    base = stock_input.replace(".NS", "")
+                    candidates = [s.replace(".NS", "") for s in available_symbols]
+                    suggestions = difflib.get_close_matches(base, candidates, n=5, cutoff=0.6)
+                    st.error("Symbol not found in selected list. Please type correct name with .NS.")
+                    if suggestions:
+                        st.caption("Similar symbols: " + ", ".join(f"{s}.NS" for s in suggestions))
+                else:
+                    selected_symbol = stock_input
+
         if st.button("Run Backtest", type="primary"):
             if not universe_symbols_bt:
                 st.error("No symbols available for backtest.")
                 return
+            if not selected_symbol:
+                st.error("Please enter a valid stock symbol with .NS.")
+                return
             with st.spinner("Running backtest..."):
                 stats_df, trades_df = backtest_universe(
-                    universe_name=universe_bt if universe_mode_bt == "Universe" else "Uploaded Symbols",
-                    symbols=tuple(universe_symbols_bt),
+                    universe_name=selected_symbol.replace(".NS", ""),
+                    symbols=(selected_symbol,),
                     start_date=start_date,
                     end_date=end_date,
                     use_ema=use_ema_bt,
