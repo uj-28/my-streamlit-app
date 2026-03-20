@@ -1368,6 +1368,44 @@ def main() -> None:
         horizontal=True,
         label_visibility="collapsed",
     )
+    if nav_choice == "AI Mode":
+        st.header("AI Mode")
+        st.caption("AI scoring is always enabled and runs when you scan in the Scanner page.")
+
+        table = st.session_state.get("scan_table", pd.DataFrame())
+        if table is None or table.empty or "AI Probability %" not in table.columns:
+            st.info("Run a scan in the Scanner page to view AI results here.")
+            return
+
+        st.subheader("AI Top 5")
+        top_ai = table.sort_values("AI Probability %", ascending=False).head(5)
+        for _, row in top_ai.iterrows():
+            prob_pct = float(row["AI Probability %"]) if pd.notna(row.get("AI Probability %")) else 50.0
+            signal_label = row.get("AI Signal", "Neutral")
+            symbol = row.get("Symbol", "-")
+            dist_ma50 = row.get("Dist MA50 %", "-")
+            dist_ma200 = row.get("Dist MA200 %", "-")
+
+            st.markdown(f"**{symbol}** - {signal_label} ({prob_pct:.0f}%)")
+            st.progress(min(max(prob_pct, 0.0), 100.0) / 100.0)
+            st.caption(f"MA50%: {dist_ma50} | MA200%: {dist_ma200}")
+
+        st.divider()
+        st.subheader("AI Feature Table")
+        ai_cols = [
+            "Symbol",
+            "AI Probability %",
+            "AI Signal",
+            "Dist MA50 %",
+            "Dist MA200 %",
+            "Volume Spike",
+            "ATR Volatility %",
+            "Supertrend Signal",
+        ]
+        ai_cols = [c for c in ai_cols if c in table.columns]
+        ai_table = table[ai_cols].copy()
+        st.dataframe(ai_table, use_container_width=True, height=520, hide_index=True)
+        return
     if nav_choice != "Scanner":
         st.info(f"{nav_choice} page is coming soon.")
         return
@@ -1699,10 +1737,7 @@ def main() -> None:
     
 
     tab_labels = ["Qualified Stocks", "All Stocks"]
-    if ai_enabled_meta and "AI Probability %" in table.columns:
-        tab_labels.append("AI Top 5")
-    tab1, tab2, *extra_tabs = st.tabs(tab_labels)
-    tab_ai = extra_tabs[0] if extra_tabs else None
+    tab1, tab2 = st.tabs(tab_labels)
     show_halftrend_meta = bool(scan_meta.get("show_halftrend", True))
     hide_columns = []
     if not use_ema_meta:
@@ -1735,8 +1770,6 @@ def main() -> None:
                 "RSI",
                 "Supertrend",
             ]
-            if ai_enabled_meta and "AI Probability %" in passed.columns:
-                pass_cols.extend(["AI Probability %", "AI Signal"])
             if show_halftrend_meta:
                 pass_cols.insert(pass_cols.index("Supertrend") + 1, "HalfTrend Signal")
             pass_cols = [col for col in pass_cols if col not in hide_columns]
@@ -1774,6 +1807,17 @@ def main() -> None:
         filter_symbol = st.session_state.get("filter_symbol_tab2", "").strip() or st.session_state.get("filter_symbol", "").strip()
         full_export = table.copy()
         full_table = table.copy()
+        ai_columns = [
+            "AI Probability %",
+            "AI Signal",
+            "Dist MA50 %",
+            "Dist MA200 %",
+            "Volume Spike",
+            "ATR Volatility %",
+            "Supertrend Signal",
+        ]
+        full_export = full_export.drop(columns=ai_columns, errors="ignore")
+        full_table = full_table.drop(columns=ai_columns, errors="ignore")
         if not show_halftrend_meta:
             full_table = full_table.drop(columns=["HalfTrend Signal"], errors="ignore")
         full_table = full_table.drop(
@@ -1813,18 +1857,6 @@ def main() -> None:
             mime="text/csv",
             use_container_width=True,
         )
-
-    if tab_ai is not None:
-        with tab_ai:
-            st.subheader("AI Top 5")
-            top_ai = table.sort_values("AI Probability %", ascending=False).head(5)
-            for _, row in top_ai.iterrows():
-                prob_pct = float(row["AI Probability %"]) if pd.notna(row.get("AI Probability %")) else 50.0
-                signal_label = row.get("AI Signal", "Neutral")
-                st.markdown(f"**{row['Symbol']}** - {signal_label} ({prob_pct:.0f}%)")
-                st.progress(min(max(prob_pct / 100.0, 0.0), 1.0))
-                st.caption(
-                    f"MA50%: {row.get('Dist MA50 %', '-')} | MA200%: {row.get('Dist MA200 %', '-')}")
 
 if __name__ == "__main__":
     main()
