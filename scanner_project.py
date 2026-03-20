@@ -1357,8 +1357,7 @@ def main() -> None:
     apply_ui_style()
     set_yf_cache()
 
-    if "enable_ai" not in st.session_state:
-        st.session_state.enable_ai = False
+    st.session_state.enable_ai = True
 
     market_data = fetch_market_data()
     stock_scanner_banner(market_data)
@@ -1369,17 +1368,6 @@ def main() -> None:
         horizontal=True,
         label_visibility="collapsed",
     )
-    if nav_choice == "AI Mode":
-        st.header("AI Mode")
-        st.caption("Enable AI scoring for probability-based signals during scans.")
-        st.toggle(
-            "Enable AI Scoring (Beta)",
-            value=bool(st.session_state.enable_ai),
-            key="enable_ai",
-            help="Train an XGBoost model and add probability-based AI signals",
-        )
-        st.info("AI scoring will apply the next time you run a scan in the Scanner page.")
-        return
     if nav_choice != "Scanner":
         st.info(f"{nav_choice} page is coming soon.")
         return
@@ -1453,7 +1441,7 @@ def main() -> None:
     )
     use_last_closed_candle = candle_mode == "Last Closed Candle"
     st.sidebar.subheader("🔍 Filter Controls")
-    enable_ai = bool(st.session_state.get("enable_ai", False))
+    enable_ai = True
     use_ema = st.sidebar.toggle("📈 Use EMA Filter (Trend)", value=False, help="Price must be above or below EMA based on the selected condition")
     use_rsi = st.sidebar.toggle("📊 Use RSI Filter (Momentum)", value=False, help="RSI must exceed threshold")
     use_supertrend = st.sidebar.toggle("📉 Use Supertrend Filter (Support/Resistance)", value=False, help="Must be in green/bullish mode")
