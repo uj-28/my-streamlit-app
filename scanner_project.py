@@ -1489,11 +1489,20 @@ def backtest_universe(
                 indicator_cache[key] = st_local
             return indicator_cache[key]
 
-        def cross_above(a: pd.Series, b: pd.Series) -> pd.Series:
-            return (a.shift(1) <= b.shift(1)) & (a > b)
+        def to_series(value: pd.Series | float | int) -> pd.Series:
+            if isinstance(value, pd.Series):
+                return value
+            return pd.Series(value, index=close.index, dtype="float64")
 
-        def cross_below(a: pd.Series, b: pd.Series) -> pd.Series:
-            return (a.shift(1) >= b.shift(1)) & (a < b)
+        def cross_above(a: pd.Series | float | int, b: pd.Series | float | int) -> pd.Series:
+            a_s = to_series(a)
+            b_s = to_series(b)
+            return (a_s.shift(1) <= b_s.shift(1)) & (a_s > b_s)
+
+        def cross_below(a: pd.Series | float | int, b: pd.Series | float | int) -> pd.Series:
+            a_s = to_series(a)
+            b_s = to_series(b)
+            return (a_s.shift(1) >= b_s.shift(1)) & (a_s < b_s)
 
         ema = ema_fn(ema_period)
         rsi = rsi_fn(rsi_length)
@@ -1525,6 +1534,10 @@ def backtest_universe(
             expr_clean = re.sub(r"\\bor\\b", "|", expr_clean, flags=re.IGNORECASE)
             expr_clean = re.sub(r"\\bgreen\\b", "1", expr_clean, flags=re.IGNORECASE)
             expr_clean = re.sub(r"\\bred\\b", "-1", expr_clean, flags=re.IGNORECASE)
+            expr_clean = re.sub(r"\\s*&\\s*", " & ", expr_clean)
+            expr_clean = re.sub(r"\\s*\\|\\s*", " | ", expr_clean)
+            if " & " in expr_clean or " | " in expr_clean:
+                expr_clean = "(" + expr_clean.replace(" & ", ") & (").replace(" | ", ") | (") + ")"
             env = {
                 "close": close,
                 "open": ensure_series(data["Open"]).astype("float64"),
@@ -1540,7 +1553,7 @@ def backtest_universe(
             try:
                 result = eval(expr_clean, {"__builtins__": {}}, env)
             except Exception as exc:
-                raise ValueError(f"Invalid rule: {exc}") from exc
+                raise ValueError(f"Invalid rule: {exc}. Parsed: {expr_clean}") from exc
             if isinstance(result, pd.Series):
                 return result.fillna(False).astype(bool)
             raise ValueError("Rule did not produce a series result.")
