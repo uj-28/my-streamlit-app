@@ -1395,6 +1395,7 @@ def backtest_universe(
     resample_rule: str | None,
     start_date: date | None,
     end_date: date | None,
+    trade_direction: str,
     use_ema: bool,
     ema_period: int,
     ema_direction: str,
@@ -1493,6 +1494,7 @@ def backtest_universe(
         in_trade = False
         entry_idx = None
         entry_price = None
+        entry_is_short = False
 
         for idx in signal.index:
             if not in_trade:
@@ -1500,6 +1502,11 @@ def backtest_universe(
                     in_trade = True
                     entry_idx = idx
                     entry_price = float(close.loc[idx])
+                    if trade_direction == "Auto (Supertrend)" and use_supertrend:
+                        st_value = st_dir.loc[idx] if idx in st_dir.index else 1
+                        entry_is_short = int(st_value) == -1
+                    else:
+                        entry_is_short = trade_direction == "Short"
                 continue
 
             if entry_idx is None or entry_price is None:
@@ -1508,9 +1515,13 @@ def backtest_universe(
 
             exit_now = False
             exit_reason = ""
+            is_short = entry_is_short if trade_direction == "Auto (Supertrend)" else trade_direction == "Short"
 
             if exit_mode == "Fixed Target/SL":
-                curr_ret = (float(close.loc[idx]) / entry_price - 1.0) * 100.0
+                if is_short:
+                    curr_ret = (entry_price / float(close.loc[idx]) - 1.0) * 100.0
+                else:
+                    curr_ret = (float(close.loc[idx]) / entry_price - 1.0) * 100.0
                 if curr_ret >= target_pct:
                     exit_now = True
                     exit_reason = f"Target {target_pct:g}%"
@@ -1534,7 +1545,10 @@ def backtest_universe(
 
             if exit_now:
                 exit_price = float(close.loc[idx])
-                ret_pct = (exit_price / entry_price - 1.0) * 100.0
+                if is_short:
+                    ret_pct = (entry_price / exit_price - 1.0) * 100.0
+                else:
+                    ret_pct = (exit_price / entry_price - 1.0) * 100.0
                 trades.append(
                     {
                         "Universe": universe_name,
@@ -1546,6 +1560,7 @@ def backtest_universe(
                         "Return %": round(ret_pct, 2),
                         "Exit Reason": exit_reason,
                         "Timeframe": timeframe_label,
+                        "Direction": "Short" if is_short else "Long",
                     }
                 )
                 in_trade = False
@@ -1691,6 +1706,11 @@ def main() -> None:
             ],
             default=["EMA Filter (Trend)"],
         )
+        trade_direction_bt = st.selectbox(
+            "Trade Direction",
+            options=["Auto (Supertrend)", "Long", "Short"],
+            index=0,
+        )
         use_ema_bt = "EMA Filter (Trend)" in selected_filters_bt
         use_rsi_bt = "RSI Filter (Momentum)" in selected_filters_bt
         use_supertrend_bt = "Supertrend Filter (Support/Resistance)" in selected_filters_bt
@@ -1801,6 +1821,7 @@ def main() -> None:
                     resample_rule=resample_rule_bt,
                     start_date=start_date,
                     end_date=end_date,
+                    trade_direction=trade_direction_bt,
                     use_ema=use_ema_bt,
                     ema_period=ema_period_bt,
                     ema_direction=ema_direction_bt,
