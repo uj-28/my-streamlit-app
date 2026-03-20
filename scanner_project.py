@@ -1,5 +1,6 @@
 from datetime import datetime, time
 from io import StringIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -18,6 +19,8 @@ LOOKBACK_PERIOD = "max"
 INDIA_TZ = ZoneInfo("Asia/Kolkata")
 NSE_MARKET_CLOSE = time(15, 30)
 NSE_INDEX_BASE_URL = "https://archives.nseindia.com/content/indices/"
+YF_BATCH_SIZE = 120
+YF_MAX_WORKERS = 4
 
 UNIVERSE_OPTIONS = [
     "NIFTY 50",
@@ -744,20 +747,52 @@ def fetch_bulk_history(
     """Download OHLCV data for multiple symbols in one request."""
     if not symbols:
         return pd.DataFrame()
-    try:
-        data = yf.download(
-            list(symbols),
-            period=period,
-            interval=interval,
-            group_by="ticker",
-            auto_adjust=False,
-            actions=False,
-            threads=True,
-            progress=False,
-        )
-        return data
-    except Exception:
+    symbols_list = list(symbols)
+
+    def normalize_batch(df: pd.DataFrame, batch: list[str]) -> pd.DataFrame:
+        if df.empty:
+            return df
+        if isinstance(df.columns, pd.MultiIndex):
+            return df
+        if len(batch) == 1:
+            symbol = batch[0]
+            df.columns = pd.MultiIndex.from_product([[symbol], df.columns])
+        return df
+
+    def fetch_batch(batch: list[str]) -> pd.DataFrame:
+        try:
+            data = yf.download(
+                batch,
+                period=period,
+                interval=interval,
+                group_by="ticker",
+                auto_adjust=False,
+                actions=False,
+                threads=True,
+                progress=False,
+            )
+            return normalize_batch(data, batch)
+        except Exception:
+            return pd.DataFrame()
+
+    batches = [symbols_list[i : i + YF_BATCH_SIZE] for i in range(0, len(symbols_list), YF_BATCH_SIZE)]
+    if len(batches) == 1:
+        return fetch_batch(batches[0])
+
+    results: list[pd.DataFrame] = []
+    max_workers = min(YF_MAX_WORKERS, len(batches))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(fetch_batch, batch) for batch in batches]
+        for fut in as_completed(futures):
+            df = fut.result()
+            if not df.empty:
+                results.append(df)
+
+    if not results:
         return pd.DataFrame()
+    if len(results) == 1:
+        return results[0]
+    return pd.concat(results, axis=1)
 
 
 def ensure_series(obj: pd.Series | pd.DataFrame) -> pd.Series:
