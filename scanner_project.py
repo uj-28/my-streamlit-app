@@ -1515,9 +1515,19 @@ def main() -> None:
     use_last_closed_candle = candle_mode == "Last Closed Candle"
     st.sidebar.subheader("🔍 Filter Controls")
     enable_ai = True
-    use_ema = st.sidebar.toggle("📈 Use EMA Filter (Trend)", value=False, help="Price must be above or below EMA based on the selected condition")
-    use_rsi = st.sidebar.toggle("📊 Use RSI Filter (Momentum)", value=False, help="RSI must exceed threshold")
-    use_supertrend = st.sidebar.toggle("📉 Use Supertrend Filter (Support/Resistance)", value=False, help="Must be in green/bullish mode")
+    selected_filters = st.sidebar.multiselect(
+        "Select Filters",
+        options=[
+            "EMA Filter (Trend)",
+            "RSI Filter (Momentum)",
+            "Supertrend Filter (Support/Resistance)",
+        ],
+        default=[],
+        help="Choose one or more filters to apply",
+    )
+    use_ema = "EMA Filter (Trend)" in selected_filters
+    use_rsi = "RSI Filter (Momentum)" in selected_filters
+    use_supertrend = "Supertrend Filter (Support/Resistance)" in selected_filters
 
     st.sidebar.divider()
     st.sidebar.subheader("🧭 HalfTrend Display")
