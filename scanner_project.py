@@ -745,6 +745,8 @@ def fetch_bulk_history(
     symbols: tuple[str, ...],
     interval: str,
     period: str,
+    start=None,
+    end=None,
 ) -> pd.DataFrame:
     """Download OHLCV data for multiple symbols in one request."""
     if not symbols:
@@ -763,16 +765,29 @@ def fetch_bulk_history(
 
     def fetch_batch(batch: list[str]) -> pd.DataFrame:
         try:
-            data = yf.download(
-                batch,
-                period=period,
-                interval=interval,
-                group_by="ticker",
-                auto_adjust=False,
-                actions=False,
-                threads=True,
-                progress=False,
-            )
+            if start is not None or end is not None:
+                data = yf.download(
+                    batch,
+                    start=start,
+                    end=end,
+                    interval=interval,
+                    group_by="ticker",
+                    auto_adjust=False,
+                    actions=False,
+                    threads=True,
+                    progress=False,
+                )
+            else:
+                data = yf.download(
+                    batch,
+                    period=period,
+                    interval=interval,
+                    group_by="ticker",
+                    auto_adjust=False,
+                    actions=False,
+                    threads=True,
+                    progress=False,
+                )
             return normalize_batch(data, batch)
         except Exception:
             return pd.DataFrame()
@@ -1392,6 +1407,8 @@ def scan_universe(
 def backtest_universe(
     universe_name: str,
     symbols: tuple[str, ...],
+    interval: str,
+    period: str,
     timeframe_label: str,
     resample_rule: str | None,
     start_date: date | None,
@@ -1421,7 +1438,7 @@ def backtest_universe(
     if not symbols:
         return pd.DataFrame(), pd.DataFrame()
 
-    bulk_data = fetch_bulk_history(symbols, interval="1d", period="max")
+    bulk_data = fetch_bulk_history(symbols, interval=interval, period=period, start=start_date, end=end_date)
     ema_is_above = ema_direction == "Above EMA"
 
     for symbol in symbols:
@@ -1741,41 +1758,93 @@ def main() -> None:
         st.header("Backtest")
         st.caption("Run a custom-rule backtest over a date range or max history.")
 
-        universe_mode_bt = st.radio(
-            "Stock Source",
-            options=["Universe", "Upload File"],
+        backtest_source_bt = st.selectbox(
+            "Backtest Source",
+            options=["Single Stock", "Universe", "Upload File"],
             index=0,
-            horizontal=True,
-            key="bt_universe_mode",
+            key="bt_source_mode",
         )
         universe_bt = st.selectbox(
             "Select Index/Universe",
             options=UNIVERSE_OPTIONS,
             index=0,
             key="bt_universe",
-            disabled=universe_mode_bt != "Universe",
+            disabled=backtest_source_bt != "Universe",
         )
         uploaded_file_bt = st.file_uploader(
             "Upload Symbols (CSV/XLSX)",
             type=["csv", "xlsx", "xls"],
             key="bt_upload",
-            disabled=universe_mode_bt != "Upload File",
+            disabled=backtest_source_bt != "Upload File",
         )
-        if universe_mode_bt == "Upload File" and uploaded_file_bt is not None:
+        if backtest_source_bt == "Upload File" and uploaded_file_bt is not None:
             universe_symbols_bt = load_symbols_from_file(uploaded_file_bt)
             universe_source_bt = f"Uploaded file: {uploaded_file_bt.name}"
-        else:
+        elif backtest_source_bt == "Universe":
             universe_symbols_bt, universe_source_bt = resolve_universe(universe_bt)
+        else:
+            universe_symbols_bt = []
+            universe_source_bt = "Single Stock"
 
         tf_col, date_col = st.columns([1, 2])
         with tf_col:
-            timeframe_bt = st.selectbox(
+            timeframe_choice_bt = st.selectbox(
                 "Timeframe",
-                options=["Daily", "Weekly"],
+                options=["Custom"],
                 index=0,
             )
-            resample_rule_bt = "W-FRI" if timeframe_bt == "Weekly" else None
-            timeframe_label_bt = "1W" if timeframe_bt == "Weekly" else "1D"
+            custom_tf_raw = ""
+            if timeframe_choice_bt == "Custom":
+                custom_tf_raw = st.text_input(
+                    "Custom Timeframe",
+                    placeholder="Examples: 3M, 1D, 1W, 1H",
+                    help="Use M for minutes, H for hours, D for days, W for weeks (e.g., 3M, 1H, 1D, 1W).",
+                ).strip().upper()
+
+            interval_bt = "1d"
+            period_bt = "max"
+            resample_rule_bt = None
+            timeframe_label_bt = "1D"
+            intraday_bt = False
+            custom_invalid_bt = False
+
+            if not re.fullmatch(r"[0-9]+[MDWH]", custom_tf_raw or ""):
+                custom_invalid_bt = True
+                timeframe_label_bt = "Custom"
+            else:
+                custom_value = int(custom_tf_raw[:-1])
+                custom_unit = custom_tf_raw[-1]
+                if custom_unit == "W":
+                    interval_bt = "1d"
+                    resample_rule_bt = f"{custom_value}W-FRI"
+                    timeframe_label_bt = f"{custom_value}W"
+                elif custom_unit == "D":
+                    interval_bt = "1d"
+                    resample_rule_bt = None if custom_value == 1 else f"{custom_value}D"
+                    timeframe_label_bt = f"{custom_value}D"
+                elif custom_unit == "H":
+                    intraday_bt = True
+                    interval_bt = "60m"
+                    resample_rule_bt = None if custom_value == 1 else f"{custom_value}H"
+                    timeframe_label_bt = f"{custom_value}H"
+                else:
+                    intraday_bt = True
+                    minutes = custom_value
+                    supported_minutes = [90, 60, 30, 15, 5, 2, 1]
+                    base_interval = 1
+                    for base in supported_minutes:
+                        if minutes % base == 0:
+                            base_interval = base
+                            break
+                    interval_bt = f"{base_interval}m"
+                    if minutes % 60 == 0:
+                        timeframe_label_bt = f"{minutes // 60}H"
+                        resample_rule_bt = None if minutes == base_interval else f"{minutes // 60}H"
+                    else:
+                        timeframe_label_bt = f"{minutes}M"
+                        resample_rule_bt = None if minutes == base_interval else f"{minutes}T"
+            if custom_invalid_bt:
+                st.error("Enter a valid timeframe like 3M, 1H, 1D, or 1W.")
         with date_col:
             use_max_history = st.checkbox("Use Max History (from beginning)", value=False)
             if use_max_history:
@@ -1795,191 +1864,119 @@ def main() -> None:
                     start_date = None
                     end_date = None
 
+        if intraday_bt:
+            max_days = 7 if interval_bt == "1m" else 60
+            if use_max_history:
+                period_bt = f"{max_days}d"
+                st.info(
+                    f"Intraday data is limited to the last {max_days} days. "
+                    "If you want to test full history, use daily or weekly."
+                )
+            else:
+                today = datetime.now().date()
+                if end_date is None:
+                    end_date = today
+                if start_date is None:
+                    start_date = end_date - pd.Timedelta(days=max_days)
+                if (end_date - start_date).days > max_days:
+                    start_date = end_date - pd.Timedelta(days=max_days)
+                    st.info(
+                        f"Intraday data is limited to the last {max_days} days, so the range was capped. "
+                        "If you want to test full history, use daily or weekly."
+                    )
+
         st.subheader("Rules")
-        use_custom_rules = st.checkbox("Use Custom Rule Logic (Pine-like)", value=False)
-        entry_expr = ""
-        exit_expr = ""
-        if use_custom_rules:
-            st.caption("Example: rsi(14) crosses above 50 and close > ema(200) and supertrend(10,3) == green")
-            presets = {
-                "Trend Long": (
-                    "rsi(14) crosses above 50 and close > ema(200) and supertrend(10,3) == green",
-                    "rsi(14) crosses below 50 or close < ema(200) or supertrend(10,3) == red",
-                ),
-                "Trend Short": (
-                    "rsi(14) crosses below 50 and close < ema(200) and supertrend(10,3) == red",
-                    "rsi(14) crosses above 50 or close > ema(200) or supertrend(10,3) == green",
-                ),
-            }
-            preset_name = st.selectbox(
-                "Rule Presets",
-                options=["Custom"] + list(presets.keys()),
-                index=0,
-                key="bt_rule_preset",
-            )
-            if preset_name in presets:
-                preset_entry, preset_exit = presets[preset_name]
-                st.session_state["bt_entry_rule"] = preset_entry
-                st.session_state["bt_exit_rule"] = preset_exit
-            entry_expr = st.text_area("Entry Rule", height=80, key="bt_entry_rule")
-            exit_expr = st.text_area("Exit Rule", height=80, key="bt_exit_rule")
-
-        filter_col, dir_col = st.columns([2, 1])
-        with filter_col:
-            selected_filters_bt = st.multiselect(
-                "Select Filters",
-                options=[
-                    "EMA Filter (Trend)",
-                    "RSI Filter (Momentum)",
-                    "Supertrend Filter (Support/Resistance)",
-                ],
-                default=["EMA Filter (Trend)"],
-                disabled=use_custom_rules,
-            )
-        with dir_col:
-            trade_direction_bt = st.selectbox(
-                "Trade Direction",
-                options=["Auto (Supertrend)", "Long", "Short"],
-                index=0,
-            )
-        use_ema_bt = "EMA Filter (Trend)" in selected_filters_bt
-        use_rsi_bt = "RSI Filter (Momentum)" in selected_filters_bt
-        use_supertrend_bt = "Supertrend Filter (Support/Resistance)" in selected_filters_bt
-
-        with st.expander("Entry Parameters", expanded=not use_custom_rules):
-            if use_ema_bt:
-                ema_direction_bt = st.radio(
-                    "EMA Condition",
-                    options=["Below EMA", "Above EMA"],
-                    index=0,
-                    horizontal=True,
-                    disabled=use_custom_rules,
-                )
-                ema_period_bt = st.number_input("EMA Period", min_value=50, max_value=400, value=200, step=5, disabled=use_custom_rules)
-            else:
-                ema_direction_bt = "Above EMA"
-                ema_period_bt = 200
-    
-            if use_rsi_bt:
-                rsi_length_bt = st.number_input("RSI Length", min_value=2, max_value=200, value=14, step=1, disabled=use_custom_rules)
-                rsi_threshold_bt = st.number_input("RSI Threshold", min_value=1.0, max_value=99.0, value=50.0, step=1.0, disabled=use_custom_rules)
-                rsi_mode_bt = st.selectbox(
-                    "RSI Condition",
-                    options=["RSI > Threshold", "RSI < Threshold", "RSI Crosses Above", "RSI Crosses Below"],
-                    index=0,
-                    disabled=use_custom_rules,
-                )
-            else:
-                rsi_length_bt = 14
-                rsi_threshold_bt = 50.0
-                rsi_mode_bt = "RSI > Threshold"
-    
-            if use_supertrend_bt:
-                atr_period_bt = st.number_input("Supertrend ATR Period", min_value=5, max_value=50, value=10, step=1, disabled=use_custom_rules)
-                atr_multiplier_bt = st.number_input("Supertrend Multiplier", min_value=1.0, max_value=10.0, value=3.0, step=0.5, disabled=use_custom_rules)
-                supertrend_mode_bt = st.radio(
-                    "Supertrend Condition",
-                    options=["Green (Bullish)", "Red (Bearish)"],
-                    index=0,
-                    horizontal=True,
-                    disabled=use_custom_rules,
-                )
-            else:
-                atr_period_bt = 10
-                atr_multiplier_bt = 3.0
-                supertrend_mode_bt = "Green (Bullish)"
-
-        with st.expander("Exit Parameters", expanded=not use_custom_rules):
-            exit_mode_bt = st.selectbox(
-                "Exit Rule Type",
-                options=["Fixed Target/SL", "Indicator Flip", "Time-based"],
-                index=0,
-                disabled=use_custom_rules,
-            )
-            target_pct_bt = 5.0
-            stop_pct_bt = 3.0
-            hold_candles_bt = 5
-            exit_indicator_bt = "EMA"
-    
-            if exit_mode_bt == "Fixed Target/SL":
-                target_pct_bt = st.number_input("Target %", min_value=0.5, max_value=50.0, value=5.0, step=0.5)
-                stop_pct_bt = st.number_input("Stop Loss %", min_value=0.5, max_value=50.0, value=3.0, step=0.5)
-            elif exit_mode_bt == "Indicator Flip":
-                exit_indicator_bt = st.selectbox(
-                    "Flip Indicator",
-                    options=["EMA", "RSI", "Supertrend"],
-                    index=0,
-                )
-            else:
-                hold_candles_bt = st.number_input("Hold Candles", min_value=1, max_value=200, value=5, step=1)
+        st.caption("Example: rsi(14) crosses above 50 and close > ema(200) and supertrend(10,3) == green")
+        presets = {
+            "Trend Long": (
+                "rsi(14) crosses above 50 and close > ema(200) and supertrend(10,3) == green",
+                "rsi(14) crosses below 50 or close < ema(200) or supertrend(10,3) == red",
+            ),
+            "Trend Short": (
+                "rsi(14) crosses below 50 and close < ema(200) and supertrend(10,3) == red",
+                "rsi(14) crosses above 50 or close > ema(200) or supertrend(10,3) == green",
+            ),
+        }
+        preset_name = st.selectbox(
+            "Rule Presets",
+            options=["Custom"] + list(presets.keys()),
+            index=0,
+            key="bt_rule_preset",
+        )
+        if preset_name in presets:
+            preset_entry, preset_exit = presets[preset_name]
+            st.session_state["bt_entry_rule"] = preset_entry
+            st.session_state["bt_exit_rule"] = preset_exit
+        entry_expr = st.text_area("Entry Rule", height=80, key="bt_entry_rule")
+        exit_expr = st.text_area("Exit Rule", height=80, key="bt_exit_rule")
 
         st.subheader("Stock Selection")
-        stock_input = st.text_input(
-            "Enter Stock Symbol (must end with .NS)",
-            placeholder="Example: TCS.NS",
-        ).strip().upper()
-
-        available_symbols = universe_symbols_bt or []
-        available_set = set(available_symbols)
+        stock_input = None
         selected_symbol = None
+        if backtest_source_bt == "Single Stock":
+            stock_input = st.text_input(
+                "Enter Stock Symbol (must end with .NS)",
+                placeholder="Example: TCS.NS",
+            ).strip().upper()
 
-        if stock_input:
-            if not stock_input.endswith(".NS"):
-                st.error("Please type correct name with .NS (e.g., TCS.NS).")
-                base = stock_input.replace(".NS", "")
-                candidates = [s.replace(".NS", "") for s in available_symbols]
-                suggestions = difflib.get_close_matches(base, candidates, n=5, cutoff=0.6)
-                if suggestions:
-                    st.caption("Did you mean: " + ", ".join(f"{s}.NS" for s in suggestions))
-            else:
-                if available_set and stock_input not in available_set:
-                    base = stock_input.replace(".NS", "")
-                    candidates = [s.replace(".NS", "") for s in available_symbols]
-                    suggestions = difflib.get_close_matches(base, candidates, n=5, cutoff=0.6)
-                    st.error("Symbol not found in selected list. Please type correct name with .NS.")
-                    if suggestions:
-                        st.caption("Similar symbols: " + ", ".join(f"{s}.NS" for s in suggestions))
+            if stock_input:
+                if not stock_input.endswith(".NS"):
+                    st.error("Please type correct name with .NS (e.g., TCS.NS).")
                 else:
                     selected_symbol = stock_input
 
         if st.button("Run Backtest", type="primary"):
-            if not universe_symbols_bt:
-                st.error("No symbols available for backtest.")
+            if timeframe_choice_bt == "Custom" and custom_invalid_bt:
+                st.error("Please enter a valid custom timeframe (e.g., 3M, 1H, 1D, 1W).")
                 return
-            if not selected_symbol:
-                st.error("Please enter a valid stock symbol with .NS.")
-                return
-            if use_custom_rules and not entry_expr.strip():
-                st.error("Please enter a custom Entry Rule.")
+            if backtest_source_bt == "Single Stock":
+                if not selected_symbol:
+                    st.error("Please enter a valid stock symbol with .NS.")
+                    return
+                symbols_bt = (selected_symbol,)
+                universe_name_bt = selected_symbol.replace(".NS", "")
+            else:
+                if not universe_symbols_bt:
+                    st.error("No symbols available for backtest.")
+                    return
+                symbols_bt = tuple(universe_symbols_bt)
+                if backtest_source_bt == "Universe":
+                    universe_name_bt = universe_bt
+                else:
+                    universe_name_bt = uploaded_file_bt.name if uploaded_file_bt else "Uploaded File"
+            if not entry_expr.strip():
+                st.error("Please enter an Entry Rule.")
                 return
             with st.spinner("Running backtest..."):
                 try:
                     stats_df, trades_df = backtest_universe(
-                        universe_name=selected_symbol.replace(".NS", ""),
-                        symbols=(selected_symbol,),
+                        universe_name=universe_name_bt,
+                        symbols=symbols_bt,
+                        interval=interval_bt,
+                        period=period_bt,
                         timeframe_label=timeframe_label_bt,
                         resample_rule=resample_rule_bt,
                         start_date=start_date,
                         end_date=end_date,
-                        trade_direction=trade_direction_bt,
-                        use_ema=use_ema_bt,
-                        ema_period=ema_period_bt,
-                        ema_direction=ema_direction_bt,
-                        use_rsi=use_rsi_bt,
-                        rsi_length=rsi_length_bt,
-                        rsi_threshold=rsi_threshold_bt,
-                        rsi_mode=rsi_mode_bt,
-                        use_supertrend=use_supertrend_bt,
-                        supertrend_mode=supertrend_mode_bt,
-                        atr_period=atr_period_bt,
-                        atr_multiplier=atr_multiplier_bt,
-                        exit_mode=exit_mode_bt,
-                        exit_indicator=exit_indicator_bt,
-                        target_pct=target_pct_bt,
-                        stop_pct=stop_pct_bt,
-                        hold_candles=int(hold_candles_bt),
-                        entry_expr=entry_expr if use_custom_rules else None,
-                        exit_expr=exit_expr if use_custom_rules else None,
+                        trade_direction="Long",
+                        use_ema=False,
+                        ema_period=200,
+                        ema_direction="Above EMA",
+                        use_rsi=False,
+                        rsi_length=14,
+                        rsi_threshold=50.0,
+                        rsi_mode="RSI > Threshold",
+                        use_supertrend=False,
+                        supertrend_mode="Green (Bullish)",
+                        atr_period=10,
+                        atr_multiplier=3.0,
+                        exit_mode="Fixed Target/SL",
+                        exit_indicator="EMA",
+                        target_pct=5.0,
+                        stop_pct=3.0,
+                        hold_candles=5,
+                        entry_expr=entry_expr,
+                        exit_expr=exit_expr if exit_expr.strip() else None,
                     )
                 except ValueError as exc:
                     st.error(str(exc))
