@@ -1434,6 +1434,10 @@ def backtest_universe(
     exit_expr: str | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     trades: list[dict] = []
+    total_bars = 0
+    total_entry_hits = 0
+    symbols_used = 0
+    symbols_skipped = 0
 
     if not symbols:
         return pd.DataFrame(), pd.DataFrame()
@@ -1453,6 +1457,7 @@ def backtest_universe(
             continue
 
         if data.empty:
+            symbols_skipped += 1
             continue
 
         if resample_rule:
@@ -1465,6 +1470,7 @@ def backtest_universe(
 
         min_required = max(ema_period + 5, atr_period + 5, rsi_length + 20, 105)
         if data.empty or len(data) < min_required + 2:
+            symbols_skipped += 1
             continue
 
         close = ensure_series(data["Close"]).astype("float64")
@@ -1473,6 +1479,7 @@ def backtest_universe(
 
         ohlc = pd.concat([high, low, close], axis=1, keys=["High", "Low", "Close"]).dropna()
         if len(ohlc) < min_required + 2:
+            symbols_skipped += 1
             continue
 
         high = ohlc["High"]
@@ -1535,24 +1542,29 @@ def backtest_universe(
             expr_clean = expr.strip()
             if not expr_clean:
                 raise ValueError("Rule cannot be empty.")
+            # Normalize whitespace to make operator parsing reliable.
+            expr_clean = re.sub(r"\s+", " ", expr_clean)
             expr_clean = re.sub(
-                r"([A-Za-z0-9_\\.()]+)\\s+crosses\\s+above\\s+([A-Za-z0-9_\\.()]+)",
-                r"cross_above(\\1, \\2)",
+                r"([A-Za-z0-9_.()]+)\s+crosses\s+above\s+([A-Za-z0-9_.()]+)",
+                r"cross_above(\1, \2)",
                 expr_clean,
                 flags=re.IGNORECASE,
             )
             expr_clean = re.sub(
-                r"([A-Za-z0-9_\\.()]+)\\s+crosses\\s+below\\s+([A-Za-z0-9_\\.()]+)",
-                r"cross_below(\\1, \\2)",
+                r"([A-Za-z0-9_.()]+)\s+crosses\s+below\s+([A-Za-z0-9_.()]+)",
+                r"cross_below(\1, \2)",
                 expr_clean,
                 flags=re.IGNORECASE,
             )
-            expr_clean = re.sub(r"\\band\\b", "&", expr_clean, flags=re.IGNORECASE)
-            expr_clean = re.sub(r"\\bor\\b", "|", expr_clean, flags=re.IGNORECASE)
-            expr_clean = re.sub(r"\\bgreen\\b", "1", expr_clean, flags=re.IGNORECASE)
-            expr_clean = re.sub(r"\\bred\\b", "-1", expr_clean, flags=re.IGNORECASE)
-            expr_clean = re.sub(r"\\s*&\\s*", " & ", expr_clean)
-            expr_clean = re.sub(r"\\s*\\|\\s*", " | ", expr_clean)
+            # Replace logical keywords with vectorized operators.
+            expr_clean = re.sub(r"\band\b", "&", expr_clean, flags=re.IGNORECASE)
+            expr_clean = re.sub(r"\bor\b", "|", expr_clean, flags=re.IGNORECASE)
+            expr_clean = re.sub(r"\s+and\s+", " & ", expr_clean, flags=re.IGNORECASE)
+            expr_clean = re.sub(r"\s+or\s+", " | ", expr_clean, flags=re.IGNORECASE)
+            expr_clean = re.sub(r"\bgreen\b", "1", expr_clean, flags=re.IGNORECASE)
+            expr_clean = re.sub(r"\bred\b", "-1", expr_clean, flags=re.IGNORECASE)
+            expr_clean = re.sub(r"\s*&\s*", " & ", expr_clean)
+            expr_clean = re.sub(r"\s*\|\s*", " | ", expr_clean)
             if " & " in expr_clean or " | " in expr_clean:
                 expr_clean = "(" + expr_clean.replace(" & ", ") & (").replace(" | ", ") | (") + ")"
             env = {
@@ -1600,6 +1612,10 @@ def backtest_universe(
             if use_supertrend:
                 signal &= supertrend_cond
             exit_signal = None
+
+        symbols_used += 1
+        total_bars += int(len(signal))
+        total_entry_hits += int(signal.fillna(False).sum())
 
         symbol_clean = symbol.replace(".NS", "")
         in_trade = False
@@ -1682,7 +1698,21 @@ def backtest_universe(
                 entry_price = None
 
     if not trades:
-        return pd.DataFrame(), pd.DataFrame()
+        stats = {
+            "Total Signals": 0,
+            "Win Rate %": 0.0,
+            "Avg Return %": 0.0,
+            "Median Return %": 0.0,
+            "Best Return %": 0.0,
+            "Worst Return %": 0.0,
+            "Cumulative Return %": 0.0,
+            "Raw Entry Signals": int(total_entry_hits),
+            "Bars Scanned": int(total_bars),
+            "Symbols Used": int(symbols_used),
+            "Symbols Skipped": int(symbols_skipped),
+        }
+        stats_df = pd.DataFrame([stats])
+        return stats_df, pd.DataFrame()
 
     trades_df = pd.DataFrame(trades)
     trades_df.sort_values(["Entry Date", "Symbol"], inplace=True, ignore_index=True)
@@ -1695,6 +1725,10 @@ def backtest_universe(
         "Best Return %": round(float(trades_df["Return %"].max()), 2),
         "Worst Return %": round(float(trades_df["Return %"].min()), 2),
         "Cumulative Return %": round(float(((trades_df["Return %"] / 100.0 + 1.0).prod() - 1.0) * 100.0), 2),
+        "Raw Entry Signals": int(total_entry_hits),
+        "Bars Scanned": int(total_bars),
+        "Symbols Used": int(symbols_used),
+        "Symbols Skipped": int(symbols_skipped),
     }
     stats_df = pd.DataFrame([stats])
     return stats_df, trades_df
@@ -1808,7 +1842,11 @@ def main() -> None:
             intraday_bt = False
             custom_invalid_bt = False
 
-            if not re.fullmatch(r"[0-9]+[MDWH]", custom_tf_raw or ""):
+            if not custom_tf_raw:
+                # Default to 1D if user leaves it blank.
+                custom_tf_raw = "1D"
+
+            if not re.fullmatch(r"[0-9]+[MDWH]", custom_tf_raw):
                 custom_invalid_bt = True
                 timeframe_label_bt = "Custom"
             else:
@@ -1844,7 +1882,7 @@ def main() -> None:
                         timeframe_label_bt = f"{minutes}M"
                         resample_rule_bt = None if minutes == base_interval else f"{minutes}T"
             if custom_invalid_bt:
-                st.error("Enter a valid timeframe like 3M, 1H, 1D, or 1W.")
+                st.error("Enter a valid timeframe like 3M, 1H, 1D, or 1W. Leave blank for 1D.")
         with date_col:
             use_max_history = st.checkbox("Use Max History (from beginning)", value=False)
             if use_max_history:
