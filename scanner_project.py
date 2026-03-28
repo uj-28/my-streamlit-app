@@ -347,16 +347,16 @@ def main() -> None:
     if nav_choice != "Scanner":
         st.info(f"{nav_choice} page is coming soon.")
         return
-    st.sidebar.header("?? Scanner Configuration")
+    st.sidebar.header("Scanner Configuration")
 
-    with st.sidebar.expander("?? About This Scanner", expanded=False):
-        st.caption("? Timeframe: Selectable (1D/1W/1M/6M/12M)")
-        st.caption("? Data: Full available history from stock listing")
-        st.caption("? Updated: Real-time with market close")
-        st.caption("? Not for backtesting - signals generated on latest candle")
+    with st.sidebar.expander("About This Scanner", expanded=False):
+        st.caption("Timeframe: Selectable (1D/1W/1M/6M/12M)")
+        st.caption("Data: Full available history from stock listing")
+        st.caption("Updated: Real-time with market close")
+        st.caption("Not for backtesting - signals generated on latest candle")
 
     universe_mode = st.sidebar.radio(
-        "?? Stock Source",
+        "Stock Source",
         options=["Universe", "Upload File"],
         index=0,
         help="Choose a predefined universe or upload your own symbols file",
@@ -364,7 +364,7 @@ def main() -> None:
     )
 
     universe = st.sidebar.selectbox(
-        "?? Select Index/Universe",
+        "Select Index/Universe",
         options=UNIVERSE_OPTIONS,
         index=0,
         help="Choose from major Indian indices, IT sector, or market cap segments",
@@ -372,7 +372,7 @@ def main() -> None:
     )
 
     uploaded_file = st.sidebar.file_uploader(
-        "?? Upload Symbols (CSV/XLSX)",
+        "Upload Symbols (CSV/XLSX)",
         type=["csv", "xlsx", "xls"],
         help="File should contain a column like Symbol/Ticker, or the first column will be used.",
         disabled=universe_mode != "Upload File",
@@ -414,7 +414,7 @@ def main() -> None:
         help="Choose whether to use the latest candle or the last fully closed candle",
     )
     use_last_closed_candle = candle_mode == "Last Closed Candle"
-    st.sidebar.subheader("?? Filter Controls")
+    st.sidebar.subheader("Filter Controls")
     enable_ai = True
     selected_filters = st.sidebar.multiselect(
         "Select Filters",
@@ -432,13 +432,13 @@ def main() -> None:
     use_supertrend = "Supertrend Filter (Support/Resistance)" in selected_filters
 
     st.sidebar.divider()
-    st.sidebar.subheader("?? HalfTrend Display")
+    st.sidebar.subheader("HalfTrend Display")
     show_halftrend = st.sidebar.toggle(
         "Show HalfTrend Signal",
         value=False,
         help="Display HalfTrend Buy/Sell/Neutral in the tables",
     )
-    st.sidebar.subheader("?? Indicator Parameters")
+    st.sidebar.subheader("Indicator Parameters")
     if use_ema:
         ema_direction = st.sidebar.radio(
             "EMA Condition",
@@ -501,7 +501,7 @@ def main() -> None:
         atr_period = 10
         atr_multiplier = 3.0
 
-    st.sidebar.subheader("? HalfTrend Parameters")
+    st.sidebar.subheader("HalfTrend Parameters")
     if show_halftrend:
         halftrend_amplitude = st.sidebar.number_input(
             "HalfTrend Amplitude",
@@ -523,7 +523,7 @@ def main() -> None:
         halftrend_amplitude = 2
         halftrend_channel_deviation = 2
 
-    st.sidebar.subheader("?? AI Confidence")
+    st.sidebar.subheader("AI Confidence")
     ai_conf_threshold = st.sidebar.slider(
         "AI Confidence Threshold",
         min_value=50,
@@ -536,13 +536,13 @@ def main() -> None:
 
     col1, col2 = st.sidebar.columns(2)
     with col1:
-        if st.button("?? Clear Cache", use_container_width=True, help="Clear cached data and reload"):
+        if st.button("Clear Cache", use_container_width=True, help="Clear cached data and reload"):
             st.cache_data.clear()
-            st.sidebar.success("? Cache cleared!")
+            st.sidebar.success("Cache cleared!")
 
     with col2:
         run_scan = st.button(
-            "?? Run Scan",
+            "Run Scan",
             type="primary",
             use_container_width=True,
             key="run_scan_button",
@@ -674,22 +674,22 @@ def main() -> None:
     active_filter_text = ", ".join(active_filters) if active_filters else "No filter active"
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("?? Universe", universe_meta)
-    m2.metric("? Scanned", f"{total_scanned}/{universe_size_meta}")
-    m3.metric("?? Matched", str(passed_count))
-    m4.metric("?? Hit Rate", f"{pass_rate:.1f}%")
+    m1.metric("Universe", universe_meta)
+    m2.metric("Scanned", f"{total_scanned}/{universe_size_meta}")
+    m3.metric("Matched", str(passed_count))
+    m4.metric("Hit Rate", f"{pass_rate:.1f}%")
 
     failed_count = universe_size_meta - total_scanned
     if failed_count > 0:
         st.warning(
-            f"?? **{failed_count} symbols** could not be loaded due to data unavailability (404/401 errors). "
+            f"**{failed_count} symbols** could not be loaded due to data unavailability (404/401 errors). "
             f"This is normal for delisted stocks or API rate limits. Scan completed with {total_scanned} available stocks."
         )
 
     st.caption(
-        f"?? Run time: {st.session_state.run_timestamp} | ?? Signal candle: {signal_candle} | "
-        f"?? Latest: {latest_available} | ?? Mode: {candle_mode} | "
-        f"?? Timeframe: {timeframe_meta} | ?? Source: {universe_source_meta} | ??? Filters: {active_filter_text}"
+        f"Run time: {st.session_state.run_timestamp} | Signal candle: {signal_candle} | "
+        f"Latest: {latest_available} | Mode: {candle_mode} | "
+        f"Timeframe: {timeframe_meta} | Source: {universe_source_meta} | Filters: {active_filter_text}"
     )
 
     tab_labels = ["Qualified Stocks", "All Stocks"]
