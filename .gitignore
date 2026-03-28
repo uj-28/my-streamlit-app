@@ -31,3 +31,6 @@ _yf_cache/
 _pycache__/
 _pycache/
 .devcontainer/
+data_cache/
+.streamlit/
+scanner.log
