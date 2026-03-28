@@ -27,3 +27,6 @@ Thumbs.db
 
 # Project-specific caches
 .yf_cache/
+_yf_cache/
+_pycache__/
+
