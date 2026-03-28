@@ -29,4 +29,5 @@ Thumbs.db
 .yf_cache/
 _yf_cache/
 _pycache__/
-
+_pycache/
+.devcontainer/
