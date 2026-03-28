@@ -34,3 +34,12 @@ _pycache/
 data_cache/
 .streamlit/
 scanner.log
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# Coverage
+.coverage
+htmlcov/
